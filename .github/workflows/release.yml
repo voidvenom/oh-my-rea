@@ -1,8 +1,8 @@
 name: Release
 
-# Publishes to npm when a version tag (v1.2.3) is pushed.
-# Auth is npm Trusted Publishing (OIDC): no npm token is stored in this repository.
-# One-time setup: npm trust github oh-my-rea --repo voidvenom/oh-my-rea --file release.yml --allow-publish
+# Creates a GitHub Release when a version tag (v1.2.3) is pushed, after the checks pass.
+# npm publishing is intentionally manual (`npm publish` from the maintainer's machine with a
+# passkey), so this repository holds no npm credentials and grants CI no publish rights.
 
 on:
   push:
@@ -16,18 +16,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
+  release:
     runs-on: ubuntu-latest
     permissions:
       contents: write   # create the GitHub Release
-      id-token: write   # npm Trusted Publishing (OIDC) and provenance
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
-          registry-url: "https://registry.npmjs.org"
           cache: "npm"
 
       - run: npm ci
@@ -47,9 +45,6 @@ jobs:
 
       - run: npm run typecheck
       - run: npm test
-
-      - name: Publish to npm
-        run: npm publish --access public
 
       - name: GitHub Release
         env:
