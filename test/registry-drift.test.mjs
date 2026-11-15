@@ -13,8 +13,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(__dirname, "..");
 
 describe("Single-source command registry, handler binding, and zero-drift invariants", () => {
-  it("derives every OMR_WORKFLOWS entry into COMMANDS, binds a runtime handler, and documents it in README.md", async () => {
-    const readme = await readFile(join(repoRoot, "README.md"), "utf8");
+  it("derives every OMR_WORKFLOWS entry into COMMANDS, binds a runtime handler, and documents it in docs/REFERENCE.md", async () => {
+    const readme = await readFile(join(repoRoot, "docs", "REFERENCE.md"), "utf8");
     const registry = createDefaultCommandRegistry();
 
     for (const wf of OMR_WORKFLOWS) {
@@ -46,7 +46,7 @@ describe("Single-source command registry, handler binding, and zero-drift invari
       assert.equal(
         readme.includes(`/${wf.id}`),
         true,
-        `README.md does not document /${wf.id}`,
+        `docs/REFERENCE.md does not document /${wf.id}`,
       );
     }
   });
