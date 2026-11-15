@@ -1,0 +1,58 @@
+{
+  "name": "oh-my-rea",
+  "version": "0.5.0",
+  "description": "omr — an evidence-first reverse-engineering & cyber operations TUI and CLI agent powered by REA.",
+  "license": "MIT",
+  "author": "voidvenom",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/voidvenom/oh-my-rea.git"
+  },
+  "homepage": "https://github.com/voidvenom/oh-my-rea#readme",
+  "bugs": {
+    "url": "https://github.com/voidvenom/oh-my-rea/issues"
+  },
+  "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": "^22.23.4 || ^24.22.1 || >=26.12.1"
+  },
+  "bin": {
+    "omr": "bin/omr.js"
+  },
+  "main": "./dist/main.js",
+  "exports": {
+    ".": "./dist/main.js",
+    "./sdk": {
+      "types": "./dist/sdk.d.ts",
+      "import": "./dist/sdk.js"
+    },
+    "./dist/*": "./dist/*",
+    "./bin/*": "./bin/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "bench": "npm run build && node bench/platform.mjs",
+    "eval": "npm run build && node eval/offline.mjs",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/client": "2.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "typescript": "^5.9.0"
+  }
+}

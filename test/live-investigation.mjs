@@ -1,0 +1,36 @@
+// Opt-in: actual local REA ledger and Unknown lifecycle, without a model or external target.
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { Rea } from "../dist/rea.js";
+import { createSession } from "../dist/session.js";
+import { SessionRuntime } from "../dist/runtime/sessionRuntime.js";
+
+const root=await mkdtemp(join(tmpdir(),"omr-live-investigation-"));
+const controller=new AbortController();const timer=setTimeout(()=>controller.abort(new Error("Investigation integration deadline")),45000);timer.unref();
+const env={PATH:process.env.PATH,...(process.env.OMR_REA_COMMAND?{OMR_REA_COMMAND:process.env.OMR_REA_COMMAND}:{})};
+const normalize=payload=>payload?.normalized_result??payload?.result??payload;
+let runtime,report;
+try {
+  const paths=[];const walk=async directory=>{for(const entry of await readdir(directory,{withFileTypes:true})){const path=join(directory,entry.name);if(entry.isDirectory())await walk(path);else if(path.endsWith(".ts"))paths.push(path);}};await walk("src");const hash=createHash("sha256");for(const path of paths.sort()){hash.update(path.replaceAll("\\","/"));hash.update(await readFile(path));}
+  const input=join(root,"application");await mkdir(input);await writeFile(join(input,"package.json"),'{"type":"module"}\n');await writeFile(join(input,"fixture.js"),'export function marker(value){return Number(value)+1;}\n');
+  const session=await createSession(null,null,{rootDir:root});runtime=new SessionRuntime(session,env,()=>({cancelAll:async()=>{}}),null,root);runtime.attachRea(await Rea.connect(session.dir,env,[],{signal:controller.signal,toolTimeoutMs:15000}));
+  for(const name of["get_evidence_bundle","list_unknowns","analyze_javascript_application","record_unknown","update_unknown","verify_unknown_resolution","reset_investigation"])assert.ok(runtime.rea.find(name),`Installed REA lacks ${name}`);
+  const initial=await runtime.investigation.refresh({signal:controller.signal});assert.equal(initial.ledger.health,"live",JSON.stringify(initial.ledger));assert.equal(initial.ledger.evidence,0);assert.equal(initial.ledger.unknownOpen,0);
+  const candidates=await runtime.investigation.discover(`Inspect "${input}"`);assert.ok(candidates.candidates.some(candidate=>candidate.path===input));await runtime.investigation.select(input,controller.signal);assert.equal(runtime.target,input);
+  const analysis=await runtime.rea.call("analyze_javascript_application",{input_path:input},{signal:controller.signal});assert.equal(analysis.isError,false,analysis.text);const state=await runtime.investigation.refresh({signal:controller.signal});assert.equal(state.ledger.health,"live");assert.ok(state.ledger.evidence>=1);assert.equal(state.lastAnalysis.value,input);assert.notEqual(state.nativeBinding.state,"open");
+  const gap=state.providerGaps[0];assert.ok(gap,`Actual provider gap shape: ${JSON.stringify({keys:Object.keys(analysis.payload),unknowns:analysis.payload.unknowns,nestedUnknowns:normalize(analysis.payload).unknowns,limitations:analysis.payload.limitations}).slice(0,5000)}`);assert.ok(gap.sources.length);const recorded=normalize(await runtime.investigation.recordGap(gap.id,"integration-fixture","low",controller.signal));assert.match(recorded.unknown_id,/^unk_[a-f0-9]{64}$/);let snapshot=await runtime.investigation.refresh({signal:controller.signal});assert.equal(snapshot.ledger.unknownOpen,1);assert.equal(snapshot.ledger.unknownTotal,1);assert.equal(snapshot.ledger.unknownResolved,0);
+  const recordedCounts=snapshot.ledger;
+  const start=performance.now();for(let index=0;index<20;index++)await runtime.investigation.refresh({signal:controller.signal});const cachedRefreshMs=performance.now()-start;
+  const journalBefore=await runtime.journal.sync();await runtime.investigation.refresh({signal:controller.signal});const journalAfter=await runtime.journal.sync();assert.equal(journalAfter.counts.records,journalBefore.counts.records,"Cached metadata refresh produced native journal events");
+  const update=await runtime.rea.call("update_unknown",{unknown_id:recorded.unknown_id,expected_revision:recorded.revision,status:"resolved",severity:recorded.severity,supporting_evidence_ids:recorded.supporting_evidence_ids,contradicting_evidence_ids:recorded.contradicting_evidence_ids,required_authority:recorded.required_authority,required_confidence:recorded.required_confidence,required_environment:recorded.required_environment,recommended_probes:recorded.recommended_probes,relationships:recorded.relationships,resolution:{disposition:"withdrawn",rationale:"Local integration fixture completed; this records withdrawal without asserting an observed runtime answer.",evidence_ids:recorded.supporting_evidence_ids}},{signal:controller.signal});assert.equal(update.isError,false,update.text);
+  snapshot=await runtime.investigation.refresh({signal:controller.signal});assert.equal(snapshot.ledger.unknownOpen,0);assert.equal(snapshot.ledger.unknownTotal,1);assert.equal(snapshot.ledger.unknownResolved,1);const resolvedCounts=snapshot.ledger;
+  const verification=await runtime.rea.call("verify_unknown_resolution",{unknown_id:recorded.unknown_id},{signal:controller.signal});assert.equal(verification.isError,false,verification.text);assert.equal(normalize(verification.payload).truthVerified,false);assert.equal(runtime.progress.snapshot().verifiedUnknowns,0);
+  const nativeSummary=await runtime.rea.call("get_evidence_bundle",{detail:"summary"},{signal:controller.signal});assert.equal(snapshot.ledger.evidence,normalize(nativeSummary.payload).total_retained_records);
+  const reset=await runtime.rea.call("reset_investigation",{},{signal:controller.signal});assert.equal(reset.isError,false,reset.text);snapshot=await runtime.investigation.refresh({signal:controller.signal});assert.equal(snapshot.ledger.health,"live");assert.equal(snapshot.ledger.evidence,0);assert.equal(snapshot.ledger.unknownTotal,0);assert.equal(snapshot.ledger.unknownOpen,0);assert.ok((await runtime.journal.sync()).counts.records>journalBefore.counts.records);
+  report={schema:"omr-live-investigation/v1",passed:true,generatedAt:new Date().toISOString(),sourceFingerprint:hash.digest("hex"),initial:initial.ledger,recorded:recordedCounts,resolved:resolvedCounts,reset:snapshot.ledger,providerQuestion:gap.question,sourceEvidence:gap.sources,unknownId:recorded.unknown_id,truthVerified:false,journalSurvivedReset:true,cachedRefresh:{iterations:20,totalMs:cachedRefreshMs,nativeEventsAdded:0},cleanup:"pending",scope:"Installed local REA; inert JavaScript application directory; no external model/target"};
+} catch(error) {report={schema:"omr-live-investigation/v1",passed:false,error:error instanceof Error?error.message:String(error),cleanup:"pending"};process.exitCode=1;}
+finally {clearTimeout(timer);try{await runtime?.close();report.cleanup="completed";}catch(error){report.passed=false;report.cleanup=String(error);process.exitCode=1;}await rm(root,{recursive:true,force:true});}
+const index=process.argv.indexOf("--report");if(index>=0)await writeFile(resolve(process.argv[index+1]),JSON.stringify(report,null,2)+"\n");console.log(JSON.stringify(report));
