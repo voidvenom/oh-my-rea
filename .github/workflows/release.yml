@@ -1,0 +1,57 @@
+name: Release
+
+# Publishes to npm when a version tag (v1.2.3) is pushed.
+# Auth is npm Trusted Publishing (OIDC): no npm token is stored in this repository.
+# One-time setup: npm trust github oh-my-rea --repo voidvenom/oh-my-rea --file release.yml --allow-publish
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the GitHub Release
+      id-token: write   # npm Trusted Publishing (OIDC) and provenance
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Tag matches package version
+        run: |
+          node -e '
+            const tag = process.env.GITHUB_REF_NAME.replace(/^v/, "");
+            const pkg = require("./package.json").version;
+            const src = /"(\d+\.\d+\.\d+)"/.exec(require("fs").readFileSync("src/version.ts", "utf8"))?.[1];
+            if (tag !== pkg || tag !== src) {
+              console.error(`version mismatch: tag=${tag} package.json=${pkg} src/version.ts=${src}`);
+              process.exit(1);
+            }
+            console.log(`releasing ${tag}`);
+          '
+
+      - run: npm run typecheck
+      - run: npm test
+
+      - name: Publish to npm
+        run: npm publish --access public
+
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag --title "$GITHUB_REF_NAME"

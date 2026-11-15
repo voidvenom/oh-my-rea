@@ -1,6 +1,6 @@
 {
   "name": "oh-my-rea",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "omr — an evidence-first reverse-engineering & cyber operations TUI and CLI agent powered by REA.",
   "license": "MIT",
   "author": "voidvenom",
