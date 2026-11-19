@@ -1215,6 +1215,7 @@ export class ModelClient implements ModelPort {
   private async streamRequest(messages: ChatMessage[], tools: ToolDefinition[], signal: AbortSignal | undefined, onText: (delta: string) => void, onReasoning?: (delta: string) => void, onRetry?: (notice: RetryNotice) => void, onNetworkStatus?: (notice: NetworkStatusNotice) => void, onStreamReset?: () => void): Promise<StreamResult> {
     const notifyNetwork = onNetworkStatus ?? this.config.onNetworkStatus;
     let httpAttempt = 0;
+    let stallRetries = 0;
     let probeAttempt = 0;
     let outageStartedAt: number | null = null;
 
@@ -1262,14 +1263,17 @@ export class ModelClient implements ModelPort {
           );
           continue;
         }
-        if (
-          emitted ||
-          httpAttempt >= MAX_RETRIES ||
-          !isRetryableModelError(error)
-        ) {
+        // A stalled stream (no bytes for the idle window, typical of long thinking on slow hosts) is
+        // resumed once: the request is re-sent from the same history, nothing was executed yet.
+        const stalled = error instanceof ModelStallError && stallRetries < 1;
+        if (!stalled && (httpAttempt >= MAX_RETRIES || !isRetryableModelError(error))) {
           throw error;
         }
-        const delayMs = retryDelayMs(httpAttempt, error);
+        if (stalled) stallRetries += 1;
+        // Output already streamed is discarded by the caller (reset) rather than blocking recovery;
+        // otherwise a mid-stream provider error after the first reasoning token ends the turn.
+        if (emitted) onStreamReset?.();
+        const delayMs = stalled ? 0 : retryDelayMs(httpAttempt, error);
         httpAttempt += 1;
         onRetry?.({
           attempt: httpAttempt,

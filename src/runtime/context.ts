@@ -1,6 +1,7 @@
 import { appendFile, copyFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Agent, type QueuedSteerItem } from "../agent.js";
+import { describeIncompleteTurn } from "../outcome.js";
 import type { LaunchOptions } from "../args.js";
 import {
   STAGED_BANG_MAX_BLOCKS,
@@ -1401,7 +1402,7 @@ export class OmrContext {
         steps: turn.steps, tool_calls: turn.toolCalls, usage: turn.usage, duration_ms: elapsedMs,
       });
       if (turn.status !== "completed" && !turn.aborted) {
-        this.output.systemNotice(`turn ${turn.status}${turn.finishReason ? ` (${turn.finishReason})` : ""}; context is available for continuation`);
+        this.output.systemNotice(`turn ${turn.status}${turn.finishReason ? ` (${turn.finishReason})` : ""}: ${describeIncompleteTurn(turn.finishReason)}; context is kept for continuation`);
       }
       const newEvidence = Math.max(0, this.evidenceSeen.size - evidenceBefore);
       wasInterruptedForSteer = this.interruptingForSteer;

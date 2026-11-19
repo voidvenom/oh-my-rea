@@ -288,6 +288,21 @@ export const compactToolOutput = (raw: string): string => {
   );
 };
 
+/** Hard bound on consecutive in-turn recoveries (empty/truncated tool turns) before the turn is reported partial. */
+const MAX_TURN_RECOVERIES = 3;
+
+/**
+ * OpenAI-compatible providers disagree on finish_reason spelling and some omit it when `[DONE]` follows a
+ * tool call. A turn that carries tool calls is a tool turn unless the provider said it was cut off.
+ */
+export const normalizeFinishReason = (raw: string | null, toolCallCount: number): string | null => {
+  const reason = raw?.trim().toLowerCase() ?? null;
+  if (reason === "function_call" || reason === "tool_call" || reason === "tool_use" || reason === "tool-calls") return "tool_calls";
+  if (reason === "end_turn" || reason === "stop_sequence" || reason === "eos") return "stop";
+  if (!reason) return toolCallCount > 0 ? "tool_calls" : raw;
+  return reason;
+};
+
 export class Agent {
   private readonly messages: ChatMessage[];
   private model: ModelPort;
@@ -912,6 +927,7 @@ export class Agent {
     let extensionsUsed = 0;
     let finishReason: string | null = null;
     let contextRecoveries = 0;
+    let turnRecoveries = 0;
     const flushPendingSteers = (step: number): boolean => {
       if (this.steerQueue.length === 0) return false;
       const items = this.steerQueue.splice(0, this.steerQueue.length);
@@ -935,6 +951,7 @@ export class Agent {
 
     for (let step = 1; step <= stepBudget; step += 1) {
       let stepMadeProgress = false;
+      let stepToolSucceeded = false;
       const progressBefore = this.options.progressEpoch?.();
       if (signal?.aborted) {
         if (pristine()) this.messages.splice(initialHistoryLength);
@@ -1077,7 +1094,7 @@ export class Agent {
             events.onStreamReset?.();
           },
         );
-        finishReason = result.finishReason;
+        finishReason = normalizeFinishReason(result.finishReason, result.toolCalls.length);
         await this.options.trace?.("model.result", {model: this.model.model, provider: this.model.providerId ?? null, step, finishReason, usage: result.usage});
         if (events.onSpeed) {
           const finishedAt = Date.now();
@@ -1211,7 +1228,24 @@ export class Agent {
 
       // A truncated tool call is not an executable instruction. Keep its visible text,
       // but never persist an unmatched protocol call or dispatch a partial side effect.
-      if (incomplete || (finishReason === "tool_calls" && streamed.toolCalls.length === 0)) {
+      const emptyToolTurn = finishReason === "tool_calls" && streamed.toolCalls.length === 0;
+      const truncated = finishReason === "length";
+      if ((emptyToolTurn || truncated) && turnRecoveries < MAX_TURN_RECOVERIES && step < stepBudget && !signal?.aborted) {
+        // The model clearly wanted to keep working (tool_calls with nothing parseable, or output cut by
+        // max_tokens, often because thinking consumed it). Do not end the turn: tell it what happened.
+        turnRecoveries += 1;
+        if (!streamed.content.trim()) this.messages.pop();
+        this.messages.push({
+          role: "user",
+          content: emptyToolTurn
+            ? "[omr] Your last response ended with finish_reason=tool_calls but contained no valid tool call. Re-issue the tool call with complete JSON arguments, or give your final answer."
+            : "[omr] Your last response was cut off by the output token limit before it finished (any partial tool call was discarded). Think less, then issue the next tool call with compact arguments, or give your final answer.",
+        });
+        await this.options.trace?.("turn.recovery", {step, reason: finishReason, attempt: turnRecoveries});
+        await this.options.historyCheckpoint?.(this.history, "turn-recovery");
+        continue;
+      }
+      if (incomplete || emptyToolTurn) {
         return {
           text: latestText || richestText, steps: step, toolCalls: totalToolCalls,
           aborted: false, status: "partial", finishReason, usage: turnUsage,
@@ -1355,6 +1389,7 @@ export class Agent {
         for (let wIdx = 0; wIdx < wave.length; wIdx += 1) {
           const item = wave[wIdx]!;
           const outcome = outcomes[wIdx]!;
+          if (!outcome.isError) stepToolSucceeded = true;
           if (!outcome.isError && progressBefore === undefined) for (const id of outcome.evidenceIds) {
             if (/^ev_[a-f0-9]{64}$/.test(id) && !this.progressEvidence.has(id)) { this.progressEvidence.add(id); stepMadeProgress = true; }
           }
@@ -1397,6 +1432,7 @@ export class Agent {
         });
       }
 
+      turnRecoveries = 0;
       flushPendingSteers(step);
       await this.options.historyCheckpoint?.(this.history, "tool-results");
       await events.onCheckpoint?.();
@@ -1404,9 +1440,12 @@ export class Agent {
 
       // Still working productively as the budget runs out: grant another block instead of
       // stopping with a partial answer that would need a manual "continue".
+      // "Still working" means measured progress OR any successfully executed tool call: shell and browser
+      // work (omr_run, camofox_evaluate) never produces REA Evidence, yet it is real work. Identical-call
+      // loops are already answered with an error by the LoopGuard, so they do not count as activity.
       if (
         step === stepBudget &&
-        stepMadeProgress &&
+        (stepMadeProgress || stepToolSucceeded) &&
         extensionsUsed < maxExtensions
       ) {
         extensionsUsed += 1;
@@ -1421,12 +1460,13 @@ export class Agent {
     }
 
     const base = richestText || latestText;
+    const capNote = maxExtensions > 0 ? ` (${maxSteps} steps x ${maxExtensions + 1} blocks)` : "";
     return {
-      text: `${base}\n\n[omr] step budget exhausted after ${stepBudget} model turns; answer is partial. Send \`continue\` to resume from this context, or raise OMR_MAX_STEPS / OMR_AUTO_EXTEND_STEPS.`.trim(),
+      text: `${base}\n\n[omr] step limit reached: ${stepBudget} model steps in one turn${capNote}. Send \`continue\` to resume from this context, or raise OMR_MAX_STEPS (steps per block, currently ${maxSteps}) / OMR_AUTO_EXTEND_STEPS (extra blocks, currently ${maxExtensions}).`.trim(),
       steps: stepBudget,
       toolCalls: totalToolCalls,
       aborted: false,
-      status: "partial", finishReason,
+      status: "partial", finishReason: "step_budget",
       usage: turnUsage,
     };
   }

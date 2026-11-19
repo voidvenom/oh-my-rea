@@ -4168,7 +4168,7 @@ describe("Step budget auto-extension, mid-turn checkpoints, and crash-resume", (
     assert.throws(() => parseArgs(["node", "omr", "--resume="]), /requires a value/);
   });
 
-  it("extends the step budget only while new Evidence arrives, up to the configured limit", async () => {
+  it("extends the step budget while tool calls keep succeeding, up to the configured limit", async () => {
     // 7 productive steps with a 3-step budget: needs two extensions (3 -> 6 -> 9).
     const extended = [];
     const agent = new Agent(scriptedModel(7), okBroker(), {
@@ -4197,7 +4197,7 @@ describe("Step budget auto-extension, mid-turn checkpoints, and crash-resume", (
     });
     const capped = await endless.run("go");
     assert.equal(capped.steps, 9);
-    assert.match(capped.text, /step budget exhausted after 9 model turns/);
+    assert.match(capped.text, /step limit reached: 9 model steps/);
 
     // Disabled by default and when set to 0: unchanged behavior.
     for (const opts of [{}, { autoExtendSteps: 0 }]) {
@@ -4208,7 +4208,7 @@ describe("Step budget auto-extension, mid-turn checkpoints, and crash-resume", (
       });
       const r = await plain.run("go");
       assert.equal(r.steps, 3);
-      assert.match(r.text, /exhausted after 3 model turns/);
+      assert.match(r.text, /step limit reached: 3 model steps/);
     }
 
     // Failing tools are not progress: no extension is granted.

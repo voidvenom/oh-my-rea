@@ -104,8 +104,8 @@ export interface ModelConfig {
   temperature: number | null;
   maxSteps: number;
   /**
-   * How many times the step budget may be extended by another `maxSteps` when the model is still making
-   * progress (successful tool calls) as the budget runs out. `0` disables auto-extension.
+   * How many times the step budget may be extended by another `maxSteps` when the model is still working
+   * (any successful tool call in the last step, or new measured Evidence) as the budget runs out. `0` disables auto-extension.
    */
   autoExtendSteps?: number;
   timeoutMs: number;
@@ -162,7 +162,9 @@ export const readStoredModelConfig = (
   }
 };
 
-const DEFAULT_AUTO_EXTEND_STEPS = 2;
+/** Steps per block; with {@link DEFAULT_AUTO_EXTEND_STEPS} extra blocks a turn may run 600 model steps. */
+const DEFAULT_MAX_STEPS = 100;
+const DEFAULT_AUTO_EXTEND_STEPS = 5;
 
 const envPositiveInt = (raw: string | undefined): number | null => {
   if (!raw) return null;
@@ -301,7 +303,7 @@ const limitsFrom = (
   const maxSteps =
     envPositiveInt(env["OMR_MAX_STEPS"]) ??
     asNumber(stored?.["max_steps"]) ??
-    40;
+    DEFAULT_MAX_STEPS;
   const timeoutMs =
     envPositiveInt(env["OMR_TIMEOUT_MS"]) ??
     asNumber(stored?.["timeout_ms"]) ??

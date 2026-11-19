@@ -3,6 +3,20 @@ export const LOOP_LIMIT = 2;
 /** Consecutive identical failures allowed for a non-read-only call. */
 export const LOOP_FAILURE_LIMIT = 2;
 
+/**
+ * Tools that observe live external state (a browser page, a running process). Their answer legitimately
+ * changes between identical calls (polling `document.readyState`, re-taking a snapshot after a wait), so
+ * they get a looser limit than REA's session-deterministic reads.
+ */
+const LIVE_STATE_TOOL = /(^|_)(evaluate|snapshot|screenshot|get_text|console|network|status|tabs|logs?)$/;
+/** Identical live-state calls allowed per turn before the guard intervenes. */
+export const LIVE_LOOP_LIMIT = 8;
+
+const effectiveTool = (name: string, args: Record<string, unknown>): string => {
+  const inner = name === "rea_call" ? args["name"] : name;
+  return typeof inner === "string" ? inner : name;
+};
+
 const stable = (value: unknown): string => {
   if (value === null || typeof value !== "object")
     return JSON.stringify(value) ?? "null";
@@ -39,7 +53,8 @@ export class LoopGuard {
   ): string | null {
     const entry = this.seen.get(LoopGuard.key(name, args));
     if (!entry) return null;
-    if (readOnly && entry.executed >= LOOP_LIMIT) {
+    const limit = LIVE_STATE_TOOL.test(effectiveTool(name, args)) ? LIVE_LOOP_LIMIT : LOOP_LIMIT;
+    if (readOnly && entry.executed >= limit) {
       return (
         `[omr loop guard] \`${name}\` already ran ${entry.executed} times this turn with identical ` +
         "arguments and returned the same data. Use the earlier result, change the arguments, or choose a different tool."

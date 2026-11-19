@@ -14,14 +14,14 @@ Write `~/.config/rea/omr-model.json`:
   "model": "your-model-id",
   "api_key_env": "YOUR_API_KEY_ENV",
   "max_tokens": 8192,
-  "max_steps": 40
+  "max_steps": 100
 }
 ```
 
 - `api_key_env` names the exported environment variable holding the key; `api_key` is also accepted.
 - Zero-config startup works automatically whenever any supported provider key is exported in your shell.
 - Optional `"providers"` map in `omr-model.json` lets you define multiple custom/self-hosted provider profiles alongside the 33 built-in providers.
-- Environment overrides: `OMR_PROVIDER`, `OMR_PROTOCOL`, `OMR_BASE_URL`, `OMR_MODEL`, `OMR_FALLBACK_MODELS` (comma-separated `provider:model` failover chain), `OMR_BUDGET_TOKENS` (cumulative session token cap), `OMR_EFFORT` (`auto` · `off` · `minimal` · `low` · `medium` · `high` · `xhigh`), `OMR_API_KEY`, `OMR_API_KEY_ENV`, `OMR_MAX_TOKENS`, `OMR_MAX_STEPS`, `OMR_AUTO_EXTEND_STEPS` (default `2`: extra step blocks granted while tool calls keep succeeding; `0` disables), `OMR_TEMPERATURE`, `OMR_TIMEOUT_MS`, `OMR_PING_INTERVAL_MS` / `OMR_NET_WAIT_MS` (Network Guard probe interval and maximum hold, honoring `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` & `NO_PROXY`).
+- Environment overrides: `OMR_PROVIDER`, `OMR_PROTOCOL`, `OMR_BASE_URL`, `OMR_MODEL`, `OMR_FALLBACK_MODELS` (comma-separated `provider:model` failover chain), `OMR_BUDGET_TOKENS` (cumulative session token cap), `OMR_EFFORT` (`auto` · `off` · `minimal` · `low` · `medium` · `high` · `xhigh`), `OMR_API_KEY`, `OMR_API_KEY_ENV`, `OMR_MAX_TOKENS`, `OMR_MAX_STEPS` (model steps per block, default `100`), `OMR_AUTO_EXTEND_STEPS` (default `5`, max `10`: extra blocks granted while the last step still ran a successful tool call, so a turn may use up to `OMR_MAX_STEPS × (1 + OMR_AUTO_EXTEND_STEPS)` steps; `0` disables. When the cap is hit the turn reports `step_budget` and names both settings), `OMR_TEMPERATURE`, `OMR_TIMEOUT_MS`, `OMR_PING_INTERVAL_MS` / `OMR_NET_WAIT_MS` (Network Guard probe interval and maximum hold, honoring `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` & `NO_PROXY`).
 - **Crash safety**: the conversation is checkpointed after every completed step. `omr --resume` (or `--resume=<id>`, or `/resume`) restores the last session and, if it ended mid-turn (crash, kill, power loss), continues that turn automatically — no manual `continue` needed.
 - `XDG_CONFIG_HOME` relocates the config directory.
 - `/model`, `/effort`, `/providers`, `/failover`, `/budget`, `/net`, and `/doctor` inspect resolved endpoints, models, failover chains, token budgets, proxy-aware Net Guard probes, thinking budgets, and key sources (never printing secret values). Pressing `Alt+S` / `Ctrl+S` in the Model Picker (or `/model --save <provider:model>`, `/effort --save <level>`, `/failover --save <chain>`, `/budget --save <tokens>`) saves the default additively to `omr-model.json` with an automatic `.bak` backup.
