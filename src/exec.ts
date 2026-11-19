@@ -20,9 +20,16 @@ import {
   isAbsolute,
 } from "node:path";
 
-/** Hard ceilings for one `omr_run` invocation. */
+/**
+ * `omr_run` per-call timeout. The default only bounds a script that did not ask for more; hitting it returns
+ * an error result to the model (never ends the turn). The ceiling is opt-in via OMR_RUN_MAX_TIMEOUT_SEC.
+ */
 export const RUN_DEFAULT_TIMEOUT_SEC = 30;
-export const RUN_MAX_TIMEOUT_SEC = 300;
+export const runMaxTimeoutSec = (env: NodeJS.ProcessEnv = process.env): number => {
+  const parsed = Number(env["OMR_RUN_MAX_TIMEOUT_SEC"]);
+  // 2^31-1 ms is the largest delay a Node timer accepts; used as "no ceiling".
+  return Number.isFinite(parsed) && parsed >= 1 ? parsed : 2_147_483;
+};
 const STREAM_HEAD_BYTES = 32_768;
 const STREAM_TAIL_BYTES = 16_384;
 const RECORD_PREVIEW_CHARS = 4_000;
@@ -333,7 +340,7 @@ export const runSessionScript = async (
 
   const timeoutSec = Math.min(
     Math.max(request.timeoutSec ?? RUN_DEFAULT_TIMEOUT_SEC, 1),
-    RUN_MAX_TIMEOUT_SEC,
+    runMaxTimeoutSec(),
   );
   const args = (request.args ?? []).map(String);
   const wantNetwork = request.network === true;

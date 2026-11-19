@@ -87,7 +87,8 @@ export interface ReaPort {
  * graphs, Ghidra decompiles, large APKs) legitimately runs longer, so omr uses an
  * inactivity window that REA progress notifications keep extending.
  */
-export const DEFAULT_TOOL_TIMEOUT_MS = 900_000;
+/** No ceiling by default (largest Node timer delay, ~24.8 days); opt in with OMR_TOOL_TIMEOUT_MS. A timeout is an error result for the model, not a turn failure. */
+export const DEFAULT_TOOL_TIMEOUT_MS = 2_147_483_647;
 const STDERR_TAIL_BYTES = 8_192;
 
 export const parseEnvelope = (text: string): unknown => {

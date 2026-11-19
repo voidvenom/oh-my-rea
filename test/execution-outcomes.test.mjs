@@ -14,7 +14,7 @@ const broker = { definitions: () => [], dispatch: async () => { throw new Error(
 
 describe("B08/B09: explicit execution outcomes", () => {
   it("preserves incomplete model finish reasons and never executes truncated calls", async () => {
-    for (const reason of ["length", "content_filter", null]) {
+    for (const reason of ["length", "content_filter"]) {
       const calls = reason === "length" ? [{ id: "cut", type: "function", function: { name: "side_effect", arguments: '{"cut":' } }] : [];
       const agent = new Agent(modelWith(result(reason, calls)), broker, {systemPrompt: "system"});
       const turn = await agent.run("inspect");
@@ -26,12 +26,22 @@ describe("B08/B09: explicit execution outcomes", () => {
     }
   });
 
+  it("treats a missing finish_reason with plain text as the final answer, not a partial stop", async () => {
+    const turn = await new Agent(modelWith(result(null)), broker, {systemPrompt: "system"}).run("inspect");
+    assert.equal(turn.status, "completed");
+    assert.equal(turn.text, "partial evidence");
+  });
+
   it("distinguishes completed, cancelled, and step exhaustion", async () => {
     const agent = new Agent(modelWith(result("stop")), broker, {systemPrompt: "system"});
     assert.equal((await agent.run("ok")).status, "completed");
     assert.equal((await agent.run("cancel", {}, AbortSignal.abort())).status, "cancelled");
-    const limited = new Agent(modelWith(result("stop")), broker, { systemPrompt: "system", maxSteps: 0 });
-    assert.equal((await limited.run("limited")).status, "partial");
+    // An opt-in step cap ends a still-working model with an explicit reason; 0/unset means unlimited.
+    const looping = { model: "fixture", stream: async () => result("tool_calls", [{ id: "c", type: "function", function: { name: "t", arguments: "{}" } }]), summarize: async () => "summary" };
+    const okBroker = { definitions: () => [], dispatch: async () => ({ tool: "t", text: "ok", isError: false, durationMs: 0, evidenceIds: [] }) };
+    const limited = await new Agent(looping, okBroker, { systemPrompt: "system", maxSteps: 2 }).run("limited");
+    assert.equal(limited.status, "partial");
+    assert.equal(limited.finishReason, "step_budget");
   });
 
   it("returns nonzero for command, model, backend, and partial failures; success stays zero", async () => {

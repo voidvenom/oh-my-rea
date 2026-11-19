@@ -1,6 +1,8 @@
-/** Identical read-only calls allowed per turn; the next one is answered by the guard instead of REA. */
+import { createHash } from "node:crypto";
+
+/** Identical read-only calls before the model is nudged (the call still runs; the guard never blocks or ends a turn). */
 export const LOOP_LIMIT = 2;
-/** Consecutive identical failures allowed for a non-read-only call. */
+/** Consecutive identical failures of a non-read-only call before the model is nudged. */
 export const LOOP_FAILURE_LIMIT = 2;
 
 /**
@@ -9,6 +11,8 @@ export const LOOP_FAILURE_LIMIT = 2;
  * they get a looser limit than REA's session-deterministic reads.
  */
 const LIVE_STATE_TOOL = /(^|_)(evaluate|snapshot|screenshot|get_text|console|network|status|tabs|logs?)$/;
+/** Distinct call signatures remembered per turn (oldest evicted). */
+const MAX_TRACKED_CALLS = 4096;
 /** Identical live-state calls allowed per turn before the guard intervenes. */
 export const LIVE_LOOP_LIMIT = 8;
 
@@ -34,18 +38,20 @@ interface Seen {
 }
 
 /**
- * Per-turn guard against a model re-issuing the same call. REA answers identical read-only calls
- * identically until session state changes, so the third copy only burns a step. Any successful
- * state-changing call clears the history because later results may legitimately differ.
+ * Per-turn detector for a model re-issuing the same call. REA answers identical read-only calls
+ * identically until session state changes, so the third copy is usually a loop; the caller prefixes a
+ * warning to the result but still executes the call. Any successful state-changing call clears the
+ * history because later results may legitimately differ.
  */
 export class LoopGuard {
   private readonly seen = new Map<string, Seen>();
 
   private static key(name: string, args: Record<string, unknown>): string {
-    return `${name}\n${stable(args)}`;
+    // Hashed so a 500-round turn with large script bodies does not retain every argument payload.
+    return createHash("sha1").update(`${name}\n${stable(args)}`).digest("base64");
   }
 
-  /** Message to return instead of executing the call, or `null` to let it run. */
+  /** Warning to attach to the call's result, or `null` when the call is not a repeat. */
   check(
     name: string,
     args: Record<string, unknown>,
@@ -57,7 +63,7 @@ export class LoopGuard {
     if (readOnly && entry.executed >= limit) {
       return (
         `[omr loop guard] \`${name}\` already ran ${entry.executed} times this turn with identical ` +
-        "arguments and returned the same data. Use the earlier result, change the arguments, or choose a different tool."
+        "arguments and likely returned the same data. Use the earlier result, change the arguments, or choose a different tool."
       );
     }
     if (!readOnly && entry.consecutiveFailures >= LOOP_FAILURE_LIMIT) {
@@ -80,7 +86,10 @@ export class LoopGuard {
     const entry = this.seen.get(key) ?? { executed: 0, consecutiveFailures: 0 };
     entry.executed += 1;
     entry.consecutiveFailures = isError ? entry.consecutiveFailures + 1 : 0;
+    this.seen.delete(key);
     this.seen.set(key, entry);
+    // Bounded: evict the oldest entry so unbounded turns cannot grow this map without limit.
+    if (this.seen.size > MAX_TRACKED_CALLS) this.seen.delete(this.seen.keys().next().value as string);
   }
 
   clear(): void {

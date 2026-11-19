@@ -102,13 +102,17 @@ export interface ModelConfig {
   apiKeyEnv: string;
   maxTokens: number;
   temperature: number | null;
+  /** Model steps per turn; `0` = unlimited (default). */
   maxSteps: number;
   /**
    * How many times the step budget may be extended by another `maxSteps` when the model is still working
    * (any successful tool call in the last step, or new measured Evidence) as the budget runs out. `0` disables auto-extension.
    */
   autoExtendSteps?: number;
+  /** Stream idle (no bytes) detector in ms; a stall is retried like any transient error. `0` disables it. */
   timeoutMs: number;
+  /** Transient HTTP/stream retries per request before it fails (default 12, jittered backoff up to 60s). */
+  maxRetries?: number;
   /** Base interval (ms) between connectivity probes during a network outage. */
   pingIntervalMs?: number;
   /** Maximum total duration (ms) to hold the session waiting for network recovery before failing. */
@@ -162,14 +166,23 @@ export const readStoredModelConfig = (
   }
 };
 
-/** Steps per block; with {@link DEFAULT_AUTO_EXTEND_STEPS} extra blocks a turn may run 600 model steps. */
-const DEFAULT_MAX_STEPS = 100;
+/** Model steps per turn; `0` = unlimited (the default). Opt in with OMR_MAX_STEPS / `max_steps`. */
+const DEFAULT_MAX_STEPS = 0;
+/** Earlier releases persisted their default of 40 into omr-model.json; it is ignored, not honored as a cap. */
+const LEGACY_DEFAULT_MAX_STEPS = 40;
+/** Extra step blocks when a step cap is configured; irrelevant while the cap is off. */
 const DEFAULT_AUTO_EXTEND_STEPS = 5;
 
 const envPositiveInt = (raw: string | undefined): number | null => {
   if (!raw) return null;
   const n = Number(raw);
   return Number.isFinite(n) && n >= 1 ? Math.trunc(n) : null;
+};
+
+const envNonNegativeInt = (raw: string | undefined): number | null => {
+  if (raw === undefined || raw.trim() === "") return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.trunc(n) : null;
 };
 
 const envFiniteNumber = (raw: string | undefined): number | null => {
@@ -300,12 +313,13 @@ const limitsFrom = (
     envPositiveInt(env["OMR_MAX_TOKENS"]) ??
     asNumber(stored?.["max_tokens"]) ??
     8192;
+  // 0 = unlimited (default). A stored `max_steps: 40` is the old persisted default, not an opt-in.
+  const storedSteps = asNumber(stored?.["max_steps"]);
   const maxSteps =
-    envPositiveInt(env["OMR_MAX_STEPS"]) ??
-    asNumber(stored?.["max_steps"]) ??
-    DEFAULT_MAX_STEPS;
+    envNonNegativeInt(env["OMR_MAX_STEPS"]) ??
+    (storedSteps !== null && storedSteps !== LEGACY_DEFAULT_MAX_STEPS ? storedSteps : DEFAULT_MAX_STEPS);
   const timeoutMs =
-    envPositiveInt(env["OMR_TIMEOUT_MS"]) ??
+    envNonNegativeInt(env["OMR_TIMEOUT_MS"]) ??
     asNumber(stored?.["timeout_ms"]) ??
     600_000;
   const temperature =
@@ -325,6 +339,8 @@ const limitsFrom = (
     envFiniteNumber(env["OMR_AUTO_EXTEND_STEPS"]) ??
     asNumber(stored?.["auto_extend_steps"]) ??
     DEFAULT_AUTO_EXTEND_STEPS;
+  const maxRetries =
+    envNonNegativeInt(env["OMR_MAX_RETRIES"]) ?? asNumber(stored?.["max_retries"]);
   const fallbackModels =
     env["OMR_FALLBACK_MODELS"] !== undefined
       ? parseFallbackModelsSpec(env["OMR_FALLBACK_MODELS"])
@@ -335,11 +351,12 @@ const limitsFrom = (
       : parseTokenBudgetSpec(stored?.["budget_tokens"]);
   return {
     maxTokens: Math.max(64, Math.trunc(maxTokens)),
-    maxSteps: Math.max(1, Math.trunc(maxSteps)),
+    maxSteps: Math.max(0, Math.trunc(maxSteps)),
     autoExtendSteps: Math.max(0, Math.min(10, Math.trunc(autoExtendSteps))),
-    timeoutMs: Math.max(1_000, Math.trunc(timeoutMs)),
+    timeoutMs: timeoutMs <= 0 ? 0 : Math.max(1_000, Math.trunc(timeoutMs)),
     temperature,
     reasoningEffort,
+    ...(maxRetries !== null ? { maxRetries: Math.max(0, Math.trunc(maxRetries)) } : {}),
     ...(fallbackModels.length > 0 ? { fallbackModels } : {}),
     ...(budgetTokens !== null ? { budgetTokens } : {}),
     ...(pingIntervalMs !== null && pingIntervalMs > 0
@@ -579,8 +596,10 @@ export const saveDefaultModelConfig = (
     api_key_env: info.config.apiKeyEnv,
     reasoning_effort: info.config.reasoningEffort ?? "auto",
     max_tokens: info.config.maxTokens,
-    max_steps: info.config.maxSteps,
   };
+  // Only an explicit step cap is persisted; unlimited (0) must also clear a legacy stored default.
+  if (info.config.maxSteps > 0) next["max_steps"] = info.config.maxSteps;
+  else delete next["max_steps"];
   // Write-then-rename so a crash mid-write can never leave a truncated config behind.
   const staging = `${path}.${process.pid}.tmp`;
   writeFileSync(staging, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });

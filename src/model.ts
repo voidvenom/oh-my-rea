@@ -185,10 +185,12 @@ export class ModelStallError extends Error {
   }
 }
 
-const MAX_RETRIES = 3;
+/** Transient HTTP/stream failures retried (with jittered exponential backoff up to 60s) before a request fails. */
+const DEFAULT_MAX_RETRIES = 12;
 const MAX_RETRY_DELAY_MS = 60_000;
 const DEFAULT_PING_INTERVAL_MS = 1_500;
-const DEFAULT_MAX_NETWORK_WAIT_MS = 15 * 60 * 1_000;
+/** 0 / unset = keep probing until the network returns or the user aborts. */
+const DEFAULT_MAX_NETWORK_WAIT_MS = Number.POSITIVE_INFINITY;
 const RETRYABLE_STATUS = new Set([
   408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 529,
 ]);
@@ -555,6 +557,7 @@ const createWatchdog = (idleMs: number, parent?: AbortSignal): Watchdog => {
   };
   const touch = (): void => {
     if (controller.signal.aborted) return;
+    if (idleMs <= 0) return;
     if (timer) clearTimeout(timer);
     timer = setTimeout(fire, idleMs);
     timer.unref?.();
@@ -1124,7 +1127,7 @@ export class ModelClient implements ModelPort {
       method: "POST",
       headers,
       body: JSON.stringify(payload),
-      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(this.config.timeoutMs)]) : AbortSignal.timeout(this.config.timeoutMs),
+      signal: this.config.timeoutMs > 0 ? (signal ? AbortSignal.any([signal, AbortSignal.timeout(this.config.timeoutMs)]) : AbortSignal.timeout(this.config.timeoutMs)) : (signal ?? null),
     });
     if (!response.ok) {
       const detail = (await response.text().catch(() => "")).slice(0, 300);
@@ -1215,7 +1218,7 @@ export class ModelClient implements ModelPort {
   private async streamRequest(messages: ChatMessage[], tools: ToolDefinition[], signal: AbortSignal | undefined, onText: (delta: string) => void, onReasoning?: (delta: string) => void, onRetry?: (notice: RetryNotice) => void, onNetworkStatus?: (notice: NetworkStatusNotice) => void, onStreamReset?: () => void): Promise<StreamResult> {
     const notifyNetwork = onNetworkStatus ?? this.config.onNetworkStatus;
     let httpAttempt = 0;
-    let stallRetries = 0;
+    const maxRetries = Math.max(0, Math.trunc(this.config.maxRetries ?? DEFAULT_MAX_RETRIES));
     let probeAttempt = 0;
     let outageStartedAt: number | null = null;
 
@@ -1263,21 +1266,20 @@ export class ModelClient implements ModelPort {
           );
           continue;
         }
-        // A stalled stream (no bytes for the idle window, typical of long thinking on slow hosts) is
-        // resumed once: the request is re-sent from the same history, nothing was executed yet.
-        const stalled = error instanceof ModelStallError && stallRetries < 1;
-        if (!stalled && (httpAttempt >= MAX_RETRIES || !isRetryableModelError(error))) {
+        // A stalled stream (no bytes for the idle window) is retried like any transient failure: the
+        // request is re-sent from the same history, and nothing was executed yet.
+        const stalled = error instanceof ModelStallError;
+        if (httpAttempt >= maxRetries || !(stalled || isRetryableModelError(error))) {
           throw error;
         }
-        if (stalled) stallRetries += 1;
         // Output already streamed is discarded by the caller (reset) rather than blocking recovery;
         // otherwise a mid-stream provider error after the first reasoning token ends the turn.
         if (emitted) onStreamReset?.();
-        const delayMs = stalled ? 0 : retryDelayMs(httpAttempt, error);
+        const delayMs = retryDelayMs(httpAttempt, error);
         httpAttempt += 1;
         onRetry?.({
           attempt: httpAttempt,
-          maxRetries: MAX_RETRIES,
+          maxRetries,
           delayMs,
           reason: retryReason(error),
         });
@@ -1298,10 +1300,9 @@ export class ModelClient implements ModelPort {
       10,
       this.config.pingIntervalMs ?? DEFAULT_PING_INTERVAL_MS,
     );
-    const maxWaitMs = Math.max(
-      50,
-      this.config.maxNetworkWaitMs ?? DEFAULT_MAX_NETWORK_WAIT_MS,
-    );
+    const maxWaitMs = this.config.maxNetworkWaitMs
+      ? Math.max(50, this.config.maxNetworkWaitMs)
+      : DEFAULT_MAX_NETWORK_WAIT_MS;
     const probeFn =
       this.config.networkProbe ??
       ((url: string, sig?: AbortSignal) =>

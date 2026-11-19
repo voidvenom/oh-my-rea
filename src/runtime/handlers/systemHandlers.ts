@@ -682,7 +682,7 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
       `key      ${mc.modelInfo?.keySource ?? "missing"}`,
       `config   ${mc.modelInfo?.file ?? modelConfigPath(ctx.env)}`,
       `catalog  ${connectedCount} connected / ${mc.providers.length} supported providers (use /model refresh or /providers)`,
-      `steps    ${mc.modelInfo?.config.maxSteps ?? "-"} · max_tokens ${mc.modelInfo?.config.maxTokens ?? "-"}`,
+      `steps    ${mc.modelInfo?.config.maxSteps ? mc.modelInfo.config.maxSteps : "unlimited"} · max_tokens ${mc.modelInfo?.config.maxTokens ?? "-"}`,
       `tokens   ${ctx.runtime.usage.snapshot().totalTokens} session total`,
     ];
     if (mc.modelError) lines.push(`problem  ${mc.modelError}`);

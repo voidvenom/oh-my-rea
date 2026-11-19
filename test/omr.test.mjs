@@ -3773,7 +3773,7 @@ describe("LoopGuard: repeated identical calls stop burning steps", () => {
     );
   });
 
-  it("stops a model that repeats the same call inside a turn without dispatching it again", async () => {
+  it("warns a model that repeats the same call but still runs it and never ends the turn", async () => {
     let dispatched = 0;
     let step = 0;
     const model = {
@@ -3827,11 +3827,12 @@ describe("LoopGuard: repeated identical calls stop burning steps", () => {
     });
     const turn = await agent.run("decompile main");
     assert.equal(turn.text, "done");
-    assert.equal(dispatched, LOOP_LIMIT);
+    assert.equal(dispatched, 5, "every call executes; the guard only nudges");
     const guarded = agent.history.filter(
       (m) => m.role === "tool" && /loop guard/.test(m.content ?? ""),
     );
     assert.equal(guarded.length, 5 - LOOP_LIMIT);
+    assert.ok(guarded.every((m) => /pseudo/.test(m.content)), "the real result is still delivered");
     agent.history.forEach((m, i) => {
       if (m.role === "tool")
         assert.ok(

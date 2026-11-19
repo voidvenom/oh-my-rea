@@ -10,7 +10,7 @@ import {
 } from "./browser.js";
 import {
   RUN_DEFAULT_TIMEOUT_SEC,
-  RUN_MAX_TIMEOUT_SEC,
+  runMaxTimeoutSec,
   renderRunOutcome,
   runSessionScript,
 } from "./exec.js";
@@ -604,7 +604,7 @@ const META_TOOLS: readonly ToolDefinition[] = Object.freeze([
           },
           timeout_s: {
             type: "number",
-            description: `Wall-clock limit in seconds (default ${RUN_DEFAULT_TIMEOUT_SEC}, max ${RUN_MAX_TIMEOUT_SEC}).`,
+            description: `Wall-clock limit in seconds (default ${RUN_DEFAULT_TIMEOUT_SEC}; pass more for long solvers/brute force, there is no ceiling). A timeout returns an error result, it does not end your turn.`,
           },
           network: {
             type: "boolean",
@@ -708,8 +708,7 @@ const META_TOOLS: readonly ToolDefinition[] = Object.freeze([
           max_steps: {
             type: "integer",
             minimum: 2,
-            maximum: 16,
-            description: "Max subagent steps (default 10).",
+            description: "Optional cap on subagent steps (default: unlimited).",
           },
           timeout_s: {
             type: "number",
@@ -1305,7 +1304,7 @@ export class ReaBroker {
       timeoutSec:
         timeout === null
           ? RUN_DEFAULT_TIMEOUT_SEC
-          : Math.min(timeout, RUN_MAX_TIMEOUT_SEC),
+          : Math.min(timeout, runMaxTimeoutSec()),
       network: args["network"] === true,
       signal,
     });
