@@ -25,6 +25,7 @@ import {
   type TargetMagic,
 } from "./binaryArt.js";
 import { summarizeToolCall } from "./broker.js";
+import { takeEarlyInput } from "./earlyInput.js";
 import {
   copyTextToClipboard,
   isKlipperImagePlaceholder,
@@ -753,10 +754,13 @@ export class TerminalUi {
     if (process.stdin.isTTY) process.stdin.setRawMode(true);
     process.stdin.resume();
     process.stdin.setEncoding("utf8");
+    // Take over from the pre-load capture in the same tick as attaching our listener, so no chunk is lost.
+    const typedAhead = takeEarlyInput();
     process.stdin.on("data", this.onData);
     this.stdout.on("resize", this.onResize);
     this.syncFlowTimer();
     this.paint();
+    if (typedAhead) this.onData(typedAhead);
   }
 
   stop(): void {

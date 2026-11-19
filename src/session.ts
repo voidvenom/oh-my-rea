@@ -835,10 +835,14 @@ export const loadSavedSession = async (
   /** Invalid or incomplete stored messages removed while repairing the protocol history. */
   droppedMessages: number;
 } | null> => {
-  const recent = await listRecentSessions(50, excludeId, rootDir);
-  if (recent.length === 0) return null;
   const clean = query.trim().toLowerCase();
   const numMatch = /^#?(\d+)$/.exec(clean);
+  // Every candidate costs a full read + JSON.parse of its history.json, so only list as many as the query
+  // can address: `last` is the first summary, `#N` is the Nth. Name/id/title queries need the whole window.
+  const isLast = !clean || clean === "last" || clean === "latest";
+  const wanted = isLast ? 1 : numMatch && Number(numMatch[1]) >= 1 ? Math.min(50, Number(numMatch[1])) : 50;
+  const recent = await listRecentSessions(wanted, excludeId, rootDir);
+  if (recent.length === 0) return null;
   const byIndex = numMatch ? recent[Number(numMatch[1]) - 1] : undefined;
   const match =
     !clean || clean === "last" || clean === "latest"

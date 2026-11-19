@@ -1,6 +1,7 @@
 import { createInterface } from "node:readline";
 import type { LaunchOptions } from "./args.js";
 import { inspectTargetMagic } from "./binaryArt.js";
+import { releaseEarlyInput } from "./earlyInput.js";
 import { resolveReaEnv } from "./env.js";
 import type { ChatImageBlock } from "./model.js";
 import {
@@ -51,6 +52,7 @@ export const runOmr = async (
     !deps &&
     Boolean(process.stdin.isTTY && process.stdout.isTTY);
 
+  if (!uiEnabled) releaseEarlyInput();
   const candidates = uiEnabled ? await listTargetCandidates(cwd) : [];
   const currentTarget = opts.target
     ? resolveTargetPath(opts.target, cwd)
@@ -78,7 +80,10 @@ export const runOmr = async (
     deps,
   });
   await ctx.persistMeta();
-  await ctx.modelController.hydrateActiveCapabilities();
+  // Interactive UI: limits may need the network (24 h cache), so hydrate behind first paint; the agent is only
+  // built after `ensureConnected`, which waits for it. One-shot / JSON / plain modes keep the deterministic wait.
+  if (uiEnabled) ctx.modelController.beginCapabilityHydration();
+  else await ctx.modelController.hydrateActiveCapabilities();
 
   const registry = createDefaultCommandRegistry();
 
@@ -356,8 +361,13 @@ export const runOmr = async (
         `active profile **${ctx.activeProfile.id}** (${ctx.activeProfile.summary}) · effort **${ctx.activeProfile.effort}**`,
       );
     }
-    void ctx.ensureConnected().catch(() => {});
-    if (resumeLine) submitQueued(resumeLine);
+    // `--resume` replaces this throwaway session's runtime, so connecting REA for it first would boot a
+    // second REA process (and make `/resume` wait for the first one). Connect after the resume instead.
+    if (resumeLine) {
+      submitQueued(resumeLine, () => void ctx.ensureConnected().catch(() => {}));
+    } else {
+      void ctx.ensureConnected().catch(() => {});
+    }
     return new Promise<number>(() => {});
   }
 

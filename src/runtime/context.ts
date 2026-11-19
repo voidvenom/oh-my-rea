@@ -929,6 +929,7 @@ export class OmrContext {
       if (this.agent) {
         this.broker.restoreSticky(this.agent.history);
       }
+      await this.modelController.whenCapabilitiesReady();
       this.ensureAgentInitialized();
       this.booting = false;
       this.output.ui?.setBusy(null);

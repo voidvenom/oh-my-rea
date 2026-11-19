@@ -380,6 +380,13 @@ startup/import/tool, loopback10ms SSE TTFT, routed schema, compaction ve trace r
 nearest-rank p50/p95 ve RSS türleri saklanır; fresh Node process OS cache flush demek değildir.
 Uzak model/API çağrısı veya dependency kurulumu yapılmaz.
 
+`npm run bench:startup -- --samples 10 --out <report.json>` interaktif TUI'nin açılışını gerçek
+bir pty üzerinde ölçer (`python3` ve PATH'te `rea` gerekir): ilk çizim, açılışta yazılan
+`/help` komutunun çalışması, 24 saatlik model-limit önbelleği bayatken ilk çizim ve büyük
+bir oturumla `--resume` (transcript'in görünmesi / geri yükleme tamamlanması). Config, cwd ve
+oturumlar geçicidir; kullanıcı config'ine dokunmaz. `--entry <bin/omr.js>` ile başka bir
+build aynı harness'la ölçülür.
+
 `node test/live-native-resume.mjs --report <report.json>` ayrıca kurulu yerel REA ile
 inert JS uygulama dizinini analiz eder; native Evidence export/import, source session
 silindikten sonra bağımsız continuation ve copied recipe proof doğrulamasını sınar.

@@ -147,6 +147,22 @@ export class ModelController {
    * Models no source knows stay unknown (no 32k guess) and the operator is told how to set one.
    * A window the operator pinned (`OMR_CONTEXT_WINDOW` / `context_window`) is never overridden.
    */
+  private capabilityHydration: Promise<void> = Promise.resolve();
+
+  /**
+   * Starts `hydrateActiveCapabilities` without waiting for it. The lookup can hit the network (provider
+   * `/models`, models.dev; up to 6 s each) whenever the 24 h limits cache is stale, so the interactive UI must
+   * not wait for it before first paint. Anything that needs the context window (agent construction) awaits
+   * {@link whenCapabilitiesReady}; failures are surfaced the same way as before (`warnedUnknownWindow`).
+   */
+  beginCapabilityHydration(signal?: AbortSignal): void {
+    this.capabilityHydration = this.hydrateActiveCapabilities(signal).catch(() => {});
+  }
+
+  whenCapabilitiesReady(): Promise<void> {
+    return this.capabilityHydration;
+  }
+
   async hydrateActiveCapabilities(signal?: AbortSignal): Promise<void> {
     if (this.noModel || !this.modelInfo) return;
     const primary = this.modelInfo.config;

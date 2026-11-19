@@ -271,9 +271,11 @@ export class Rea implements ReaPort {
       if (typeof value === "string") childEnv[key] = value;
     }
     childEnv["REA_SESSION_DIR"] = sessionDir;
-    const [{ Client }, { StdioClientTransport }] = await Promise.all([
+    const [{ Client }, { StdioClientTransport }, { AjvJsonSchemaValidator }, { createLazyValidatorProvider }] = await Promise.all([
       import("@modelcontextprotocol/client"),
       import("@modelcontextprotocol/client/stdio"),
+      import("@modelcontextprotocol/client/validators/ajv"),
+      import("./lazyValidator.js"),
     ]);
     const reaCommand = childEnv["OMR_REA_COMMAND"] ?? siblingForkLauncher();
     // stderr is piped (never inherited) so REA diagnostics cannot corrupt the TUI's
@@ -297,7 +299,7 @@ export class Rea implements ReaPort {
 
     let rea: Rea | null = null;
     let earlyCatalogChange = false;
-    const client = new Client({ name: "omr", version: VERSION }, { listChanged: {
+    const client = new Client({ name: "omr", version: VERSION }, { jsonSchemaValidator: createLazyValidatorProvider(new AjvJsonSchemaValidator()), listChanged: {
       tools: { autoRefresh: false, debounceMs: 0, onChanged: () => {
         if (rea) rea.invalidateCatalog(); else earlyCatalogChange = true;
       } },

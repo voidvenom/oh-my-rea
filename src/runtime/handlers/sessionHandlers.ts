@@ -627,6 +627,12 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
       return;
     }
     if (ctx.activeAbort) { ctx.output.fail("Finish or cancel the active turn before resuming another session"); return; }
+    // Paint the saved transcript now. Forking the session directory, tearing down the old runtime and
+    // connecting REA take seconds; the operator should be reading the conversation meanwhile, not staring
+    // at an empty screen. The banner and carried-evidence notes are added once the restore completes.
+    const previousHistory = ctx.agent?.history ?? [];
+    ctx.output.ui?.hydrateFromHistory(loaded.messages);
+    ctx.output.ui?.setBusy("restoring session");
     try {
       const source = sessionInfoFromSummary(loaded.summary);
       const continuation = await forkSession(source, loaded.messages, loaded.summary.target, ctx.modelId, {label: "resume", rootDir: ctx.sessionsRootDir});
@@ -635,6 +641,8 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
       const originalGoal = loaded.messages.find(message => message.role === "user")?.content;
       if (typeof originalGoal === "string") await ctx.runtime.task.initializeGoal(stripInternalPromptNotes(originalGoal));
     } catch (error) {
+      ctx.output.ui?.setBusy(null);
+      ctx.output.ui?.hydrateFromHistory(previousHistory);
       ctx.output.fail(`resume failed: ${errorMessageOf(error)}`);
       return;
     }
@@ -644,8 +652,10 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
     const resumedTitle = loaded.summary.title || resumedId;
     const resumedShort = loaded.summary.shortId || resumedId;
     let droppedMessages = loaded.droppedMessages;
+    let agentDropped = 0;
     if (ctx.agent) {
-      droppedMessages += ctx.agent.restoreHistory(loaded.messages).droppedMessages;
+      agentDropped = ctx.agent.restoreHistory(loaded.messages).droppedMessages;
+      droppedMessages += agentDropped;
       ctx.broker?.restoreSticky(ctx.agent.history);
       ctx.lastAssistantText =
         [...ctx.agent.history]
@@ -688,9 +698,9 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
     const repairNote = droppedMessages > 0 ? `\nDiscarded ${droppedMessages} invalid or incomplete saved message(s).` : "";
     const bannerText = `resumed session **#${loaded.summary.index} [${resumedShort}]** · **${resumedTitle}** (\`${resumedId}\` · ${restoredCount} messages${resumedTarget ? ` · target \`${resumedTarget}\`` : ""})${carriedNote}${repairNote}`;
     if (ctx.output.ui) {
-      ctx.output.ui.hydrateFromHistory(restoredMessages, {
-        bannerText,
-      });
+      // The transcript is already on screen; re-render it only if the agent's repaired history differs.
+      if (agentDropped === 0 && restoredCount === loaded.messages.length) ctx.output.ui.addSystem(bannerText);
+      else ctx.output.ui.hydrateFromHistory(restoredMessages, { bannerText });
       if (ctx.opts.json) {
         ctx.output.emit("command.result", {
           command: "resume",
