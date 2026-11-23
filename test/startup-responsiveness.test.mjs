@@ -84,7 +84,7 @@ test("REA detection searches PATH instead of running rea, and updateNotice never
     await assert.rejects(readFile(marker), { code: "ENOENT" }, "detectRea must not execute rea");
 
     const started = performance.now();
-    const notice = updateNotice(env);
+    const notice = await updateNotice(env);
     const elapsed = performance.now() - started;
     assert.ok(elapsed < 400, `updateNotice blocked for ${elapsed.toFixed(0)} ms`);
     assert.equal(notice, null, "version unknown on first sight: no notice yet, resolved in the background");
@@ -100,7 +100,7 @@ test("REA detection searches PATH instead of running rea, and updateNotice never
     assert.equal(cached?.version, "6.9.0");
     assert.equal(cached?.path, fake);
     const second = performance.now();
-    assert.match(updateNotice(env) ?? "", /rea 7\.0\.0/);
+    assert.match(await updateNotice(env) ?? "", /rea 6\.9\.0 → 7\.0\.0/);
     assert.ok(performance.now() - second < 400);
     assert.equal(detectRea(env).version, "6.9.0");
     assert.deepEqual(detectReaExact(env), { state: "ok", source: "path", version: "6.9.0" });
@@ -111,10 +111,10 @@ test("REA detection searches PATH instead of running rea, and updateNotice never
     await writeFile(sibling, 'console.log("rea 6.8.0");\n');
     assert.deepEqual(resolveReaLauncher(env), { source: "checkout", path: sibling });
     assert.deepEqual(detectRea(env), { state: "ok", source: "checkout", version: null });
-    assert.equal(updateNotice(env), null, "the cached PATH version does not describe the checkout");
+    assert.equal(await updateNotice(env), null, "the cached PATH version does not describe the checkout");
     const overridden = { ...env, OMR_REA_COMMAND: fake };
     assert.deepEqual(resolveReaLauncher(overridden), { source: "env", path: fake });
-    assert.equal(updateNotice(overridden), null, "registry updates do not apply to the explicit override");
+    assert.equal(await updateNotice(overridden), null, "registry updates do not apply to the explicit override");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

@@ -1133,6 +1133,15 @@ const LOCAL_COMMANDS: readonly Command[] = [
     source: "builtin",
   },
   {
+    name: "changelog",
+    description: "Show release notes for the installed version, a specific version, or all versions",
+    kind: "local",
+    argument: "optional",
+    usage: "/changelog [version|--all]",
+    requires: {},
+    source: "builtin",
+  },
+  {
     name: "help",
     aliases: ["?"],
     description: "Show commands and TUI keyboard shortcuts",

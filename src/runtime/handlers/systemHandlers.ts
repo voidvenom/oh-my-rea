@@ -49,6 +49,18 @@ import type { CommandRegistry } from "../commandRegistry.js";
 import { errorMessageOf, splitShellTokens } from "../utils.js";
 
 export const registerSystemHandlers = (registry: CommandRegistry): void => {
+  registry.register("changelog", async (ctx, rest) => {
+    const { changelogText, changelogError, noChangelogSection } = await import("../../changelog.js");
+    const selection = rest || VERSION;
+    try {
+      const notes = await changelogText(selection);
+      if (!notes) ctx.output.fail(noChangelogSection(selection));
+      else if (ctx.output.ui) ctx.output.ui.showOutput("/changelog", notes, { expanded: true });
+      else ctx.output.commandResult("changelog", { selection, markdown: notes }, notes);
+    } catch (error) {
+      ctx.output.fail(changelogError(error));
+    }
+  });
   registry.register("find", async (ctx, rest) => {
     let path = ctx.currentTarget ?? "";
     let isApk =

@@ -79,6 +79,10 @@ In the TUI:
 
 ## Commands
 
+`omr changelog [version|--all]` reads the packaged changelog without loading REA. In the TUI, `/changelog` defaults to the installed version and opens a paged Inspector. Use PgUp/PgDn to scroll and Esc to return.
+
+Update checks use `$XDG_CONFIG_HOME/rea/omr-update.json` (default `~/.config/rea/omr-update.json`). A terminal launch reads the previous result and starts a background refresh if it is missing or at least 24 hours old. The first start with an empty cache only primes it if the process stays open long enough for the refresh. The next launch can show the update, and a launch with a stale cache can still show its previous result. Each interactive installation version shows its packaged summary once. A successful `omr update` shows the newly installed summary if the package contains one. Set `OMR_NO_UPDATE_CHECK=1` to disable registry checks and update notices, or use CI to suppress both automatic update and release notices.
+
 | Command                                                                                                            | Kind     | Purpose                                                                                                  |
 | ------------------------------------------------------------------------------------------------------------------ | -------- | -------------------------------------------------------------------------------------------------------- |
 | `/open <path>`                                                                                                     | local    | open and bind a target artifact                                                                          |

@@ -8,6 +8,25 @@ import { VERSION } from "./version.js";
 const main = async (): Promise<number> => {
   // `omr setup` / `omr update` are subcommands unless a file with that name exists (then it is a target).
   const sub = process.argv[2];
+  if (sub === "changelog" && !existsSync(sub)) {
+    const { changelogText, changelogError, noChangelogSection } = await import("./changelog.js");
+    if (process.argv.length > 4) {
+      process.stderr.write("usage: omr changelog [version|--all]\n");
+      return 2;
+    }
+    const selection = process.argv[3] ?? VERSION;
+    try {
+      const notes = await changelogText(selection);
+      if (notes) {
+        process.stdout.write(`${notes}\n`);
+        return 0;
+      }
+      process.stderr.write(`${noChangelogSection(selection)}\n`);
+    } catch (error) {
+      process.stderr.write(`${changelogError(error)}\n`);
+    }
+    return 1;
+  }
   if ((sub === "setup" || sub === "update") && process.argv.length === 3 && !existsSync(sub)) {
     const setup = await import("./setup.js");
     const { env } = resolveReaEnv();
@@ -43,7 +62,8 @@ const main = async (): Promise<number> => {
         `  omr <target> "<goal>"        one-shot bounded investigation\n` +
         `  omr /<command> [args]        one-shot slash command\n` +
         `  omr setup                    check the environment and install REA (asks first)\n` +
-        `  omr update                   update omr and REA to the latest npm release\n\n` +
+        `  omr update                   update omr and REA to the latest npm release\n` +
+        `  omr changelog [version|--all] show release notes\n\n` +
         `Flags:\n` +
         `  --json             versioned JSONL events (${SCHEMA_VERSION})\n` +
         `  --plain            plain line REPL / output (no alternate screen)\n` +
@@ -62,8 +82,7 @@ const main = async (): Promise<number> => {
   const stop = await setup.ensureRea();
   if (stop !== null) return stop;
   if (!wantsTui && !opts.json && process.stdout.isTTY) {
-    const notice = setup.updateNotice(resolveReaEnv().env);
-    if (notice) process.stderr.write(`\x1b[2m${notice}\x1b[0m\n`);
+    await setup.announceRelease(resolveReaEnv().env, (notice) => process.stderr.write(`${notice}\n`));
   }
 
   // The interactive TUI will own the keyboard once it starts; capture keystrokes from now on so a command

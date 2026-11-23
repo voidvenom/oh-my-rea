@@ -363,10 +363,9 @@ export const runOmr = async (
       ui.setBusy(null);
       output.fail(error instanceof Error ? error.message : String(error));
     });
-    void initialization.then(() => import("./setup.js")).then(({ updateNotice }) => {
-      const notice = updateNotice(ctx.env);
-      if (notice) ui.addSystem(notice);
-    }).catch(() => {});
+    void initialization.then(() => import("./setup.js")).then(({ announceRelease }) =>
+      announceRelease(ctx.env, (notice) => ui.addSystem(notice)),
+    ).catch(() => {});
     if (!resumeLine) {
       void initialization.then(() => ctx.ensureConnected()).catch(() => {});
     }

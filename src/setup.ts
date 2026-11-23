@@ -7,11 +7,13 @@
  * without an explicit "yes" (or an explicit `omr setup` / `omr update` command)
  * and never sends anything but the public package name to the npm registry.
  */
-import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { execFile, spawn, spawnSync } from "node:child_process";
+import { readFileSync, statSync } from "node:fs";
+import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
+import { promisify } from "node:util";
 import { resolveReaEnv } from "./env.js";
 import { resolveReaLauncher } from "./reaLauncher.js";
 import { VERSION } from "./version.js";
@@ -114,9 +116,9 @@ interface UpdateCache {
 const cachePath = (env: NodeJS.ProcessEnv = process.env): string =>
   join(env["XDG_CONFIG_HOME"] ?? join(homedir(), ".config"), "rea", "omr-update.json");
 
-const readCache = (env: NodeJS.ProcessEnv): UpdateCache | null => {
+const parseCache = (text: string): UpdateCache | null => {
   try {
-    const raw = JSON.parse(readFileSync(cachePath(env), "utf8")) as Partial<UpdateCache>;
+    const raw = JSON.parse(text) as Partial<UpdateCache>;
     if (typeof raw.checkedAt !== "number" || typeof raw.latest !== "object" || raw.latest === null) return null;
     const rea = raw.rea;
     const validRea = rea && typeof rea.path === "string" && typeof rea.mtimeMs === "number" && typeof rea.version === "string";
@@ -126,13 +128,17 @@ const readCache = (env: NodeJS.ProcessEnv): UpdateCache | null => {
   }
 };
 
-const writeCache = (env: NodeJS.ProcessEnv, cache: UpdateCache): void => {
+const readCache = (env: NodeJS.ProcessEnv): Promise<UpdateCache | null> =>
+  readFile(cachePath(env), "utf8").then(parseCache, () => null);
+
+let cacheWriteSequence = 0;
+const writeCache = async (env: NodeJS.ProcessEnv, cache: UpdateCache): Promise<void> => {
   try {
     const path = cachePath(env);
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    const temp = `${path}.${process.pid}.tmp`;
-    writeFileSync(temp, `${JSON.stringify(cache)}\n`, { mode: 0o600 });
-    renameSync(temp, path);
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    const temp = `${path}.${process.pid}.${cacheWriteSequence++}.tmp`;
+    await writeFile(temp, `${JSON.stringify(cache)}\n`, { mode: 0o600 });
+    await rename(temp, path);
   } catch {
     // The cache is an optimization; a read-only config dir must never break startup.
   }
@@ -152,14 +158,26 @@ const fetchLatest = async (name: string): Promise<string | null> => {
   }
 };
 
-const refreshCache = async (env: NodeJS.ProcessEnv): Promise<UpdateCache> => {
-  const previous = readCache(env);
-  const [omr, rea] = await Promise.all([fetchLatest(OMR_PACKAGE), fetchLatest(REA_PACKAGE)]);
+const refreshCache = async (
+  env: NodeJS.ProcessEnv,
+  previous: UpdateCache | null = null,
+  refreshRegistry = true,
+  reaProbe?: { path: string; mtimeMs: number },
+): Promise<UpdateCache> => {
+  const [[omr, rea], installed] = await Promise.all([
+    refreshRegistry ? Promise.all([fetchLatest(OMR_PACKAGE), fetchLatest(REA_PACKAGE)]) : [null, null],
+    reaProbe ? readReaVersionAsync(reaProbe.path, env) : null,
+  ]);
   const latest: UpdateCache["latest"] = { ...previous?.latest };
   if (omr) latest[OMR_PACKAGE] = omr;
   if (rea) latest[REA_PACKAGE] = rea;
-  const cache: UpdateCache = { checkedAt: Date.now(), latest, ...(previous?.rea ? { rea: previous.rea } : {}) };
-  writeCache(env, cache);
+  const installedRea = reaProbe && installed ? { ...reaProbe, version: installed } : previous?.rea;
+  const cache: UpdateCache = {
+    checkedAt: refreshRegistry ? Date.now() : previous?.checkedAt ?? 0,
+    latest,
+    ...(installedRea ? { rea: installedRea } : {}),
+  };
+  await writeCache(env, cache);
   return cache;
 };
 
@@ -172,17 +190,12 @@ const mtimeOf = (path: string): number | null => {
 };
 
 const cachedReaVersion = (env: NodeJS.ProcessEnv, path: string): string | null => {
-  const rea = readCache(env)?.rea;
-  return rea && rea.path === path && rea.mtimeMs === mtimeOf(path) ? rea.version : null;
-};
-
-/** Records the installed REA version off the launch path so the update notice can compare it next start. */
-const refreshReaVersion = async (env: NodeJS.ProcessEnv, path: string): Promise<void> => {
-  const mtimeMs = mtimeOf(path);
-  const version = await readReaVersionAsync(path, env);
-  if (mtimeMs === null || !version) return;
-  const previous = readCache(env) ?? { checkedAt: 0, latest: {} };
-  writeCache(env, { ...previous, rea: { path, mtimeMs, version } });
+  try {
+    const rea = parseCache(readFileSync(cachePath(env), "utf8"))?.rea;
+    return rea && rea.path === path && rea.mtimeMs === mtimeOf(path) ? rea.version : null;
+  } catch {
+    return null;
+  }
 };
 
 const isNewer = (latest: string | undefined, installed: string | null): boolean => {
@@ -196,21 +209,37 @@ const isNewer = (latest: string | undefined, installed: string | null): boolean 
  * refresh runs in the background and is picked up on the next start, so startup
  * never waits on the network. Opt out with `OMR_NO_UPDATE_CHECK=1`.
  */
-export const updateNotice = (env: NodeJS.ProcessEnv = process.env): string | null => {
+const pendingRefreshes = new Map<string, Promise<UpdateCache>>();
+
+export const updateNotice = async (env: NodeJS.ProcessEnv = process.env): Promise<string | null> => {
   if (env["OMR_NO_UPDATE_CHECK"] === "1" || env["CI"]) return null;
-  const cache = readCache(env);
-  if (!cache || Date.now() - cache.checkedAt > CHECK_INTERVAL_MS) {
-    void refreshCache(env).catch(() => {});
+  const cache = await readCache(env);
+  const needsRegistry = !cache || Date.now() - cache.checkedAt >= CHECK_INTERVAL_MS;
+  // A registry update can only update the active PATH install.
+  const launcher = resolveReaLauncher(env);
+  const path = launcher?.source === "path" ? launcher.path : undefined;
+  const mtimeMs = path ? await stat(path).then((info) => info.mtimeMs, () => null) : null;
+  const rea = cache?.rea;
+  const installed = rea && rea.path === path && rea.mtimeMs === mtimeMs ? rea.version : null;
+  const probe = path && mtimeMs !== null && !installed ? { path, mtimeMs } : undefined;
+  const key = cachePath(env);
+  if ((needsRegistry || probe) && !pendingRefreshes.has(key)) {
+    const refresh = refreshCache(env, cache, needsRegistry, probe);
+    pendingRefreshes.set(key, refresh);
+    void refresh.finally(() => pendingRefreshes.delete(key)).catch(() => {});
   }
   if (!cache) return null;
-  // A registry update can only update the installed REA, not an explicit override or checkout.
-  const launcher = resolveReaLauncher(env);
-  const installedVersion = launcher?.source === "path" ? cachedReaVersion(env, launcher.path) : null;
-  if (launcher?.source === "path" && installedVersion === null) void refreshReaVersion(env, launcher.path).catch(() => {});
   const outdated: string[] = [];
-  if (isNewer(cache.latest[OMR_PACKAGE], VERSION)) outdated.push(`omr ${cache.latest[OMR_PACKAGE]}`);
-  if (isNewer(cache.latest[REA_PACKAGE], installedVersion)) outdated.push(`rea ${cache.latest[REA_PACKAGE]}`);
-  return outdated.length ? `update available: ${outdated.join(", ")} — run \`omr update\`` : null;
+  if (isNewer(cache.latest[OMR_PACKAGE], VERSION)) outdated.push(`omr ${VERSION} → ${cache.latest[OMR_PACKAGE]}`);
+  if (isNewer(cache.latest[REA_PACKAGE], installed)) outdated.push(`rea ${installed} → ${cache.latest[REA_PACKAGE]}`);
+  return outdated.length ? `Update available: ${outdated.join(", ")} · /changelog · omr update` : null;
+};
+
+export const announceRelease = async (env: NodeJS.ProcessEnv, display: (text: string) => void): Promise<void> => {
+  await Promise.all([
+    updateNotice(env).then((notice) => { if (notice) display(notice); }),
+    import("./changelog.js").then(({ whatsNew }) => whatsNew(env)).then((notes) => { if (notes) display(notes); }),
+  ]);
 };
 
 // ── install / update ──────────────────────────────────────────────────────────
@@ -304,7 +333,7 @@ export const runSetup = async (env: NodeJS.ProcessEnv = process.env): Promise<nu
 
 /** `omr update`: bring omr and REA to the latest npm release. */
 export const runUpdate = async (env: NodeJS.ProcessEnv = process.env): Promise<number> => {
-  const cache = await refreshCache(env);
+  const cache = await refreshCache(env, await readCache(env));
   const rea = detectReaExact(env);
   const targets: { name: string; spec: string; from: string }[] = [];
   const latestOmr = cache.latest[OMR_PACKAGE];
@@ -328,7 +357,22 @@ export const runUpdate = async (env: NodeJS.ProcessEnv = process.env): Promise<n
     if (code !== 0) {
       failed = true;
       process.stderr.write(`error: ${target.name} update failed (exit ${code}).\n${permissionHint()}\n`);
+    } else if (target.name === "omr") {
+      await printInstalledReleaseNotes(env);
     }
   }
   return failed ? 1 : 0;
+};
+
+const printInstalledReleaseNotes = async (env: NodeJS.ProcessEnv): Promise<void> => {
+  try {
+    const { stdout } = await promisify(execFile)("npm", ["root", "--global"], { encoding: "utf8" });
+    const root = join(stdout.trim(), OMR_PACKAGE);
+    const { version } = JSON.parse(await readFile(join(root, "package.json"), "utf8")) as { version: string };
+    const { whatsNew } = await import("./changelog.js");
+    const notes = await whatsNew(env, version, join(root, "CHANGELOG.md"));
+    if (notes) process.stdout.write(`${notes}\n`);
+  } catch {
+    // The next interactive start can still display notes from the installed package.
+  }
 };

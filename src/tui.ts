@@ -25,7 +25,7 @@ import {
   type TargetMagic,
 } from "./binaryArt.js";
 import { summarizeToolCall } from "./broker.js";
-import { takeEarlyInput } from "./earlyInput.js";
+import { normalizeTypedAhead, takeEarlyInput } from "./earlyInput.js";
 import {
   copyTextToClipboard,
   isKlipperImagePlaceholder,
@@ -521,6 +521,7 @@ export class TerminalUi {
   private ctrlCArmedUntil = 0;
 
   private started = false;
+  private firstInput = true;
   private paintTimer: NodeJS.Timeout | null = null;
   private flowTimer: NodeJS.Timeout | null = null;
   private tick = 0;
@@ -759,6 +760,7 @@ export class TerminalUi {
   start(): void {
     if (this.started || !this.stdout.isTTY) return;
     this.started = true;
+    this.firstInput = true;
     this.lastInteractionAt = Date.now();
     this.prevLines = [];
     this.stdout.write(
@@ -1201,14 +1203,15 @@ export class TerminalUi {
     this.schedule();
   }
 
-  showOutput(label: string, text: string): void {
+  showOutput(label: string, text: string, options?: { expanded: boolean }): void {
     const capped =
-      text.length > MAX_OUTPUT_CHARS
+      !options?.expanded && text.length > MAX_OUTPUT_CHARS
         ? `${text.slice(0, MAX_OUTPUT_CHARS)}\n… (${text.length - MAX_OUTPUT_CHARS} chars omitted in UI; use /export for complete artifact)`
         : text;
     this.output = { label, text: sanitizeText(capped) };
     this.outputWrapCache = null;
     this.outputDrawerOpen = true;
+    if (options?.expanded) this.outputExpanded = true;
     this.outputScroll = 0;
     this.paint();
   }
@@ -1492,7 +1495,10 @@ export class TerminalUi {
     this.lastInteractionAt = Date.now();
     this.syncFlowTimer();
     const text = typeof chunk === "string" ? chunk : this.decoder.write(chunk);
-    this.handleText(text);
+    // A cooked line can still be queued in the tty when its read reaches the new listener.
+    const first = this.firstInput;
+    this.firstInput = false;
+    this.handleText(first ? normalizeTypedAhead(text) : text);
   };
 
   private flushPasteBuffer(): void {
