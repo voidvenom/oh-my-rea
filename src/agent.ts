@@ -45,6 +45,9 @@ import {
 } from "./compaction.js";
 import { buildSnapcompactArchive } from "./snapcompact.js";
 
+/** How many times in a row an empty/cut-off model reply is repaired automatically before the turn is reported as partial. */
+const MAX_EMPTY_TURN_RECOVERIES = 8;
+
 export interface AgentEvents {
   /**
    * Called after every completed step whose tool results are all in history (a valid, resumable
@@ -912,6 +915,9 @@ export class Agent {
     let extensionsUsed = 0;
     let finishReason: string | null = null;
     let contextRecoveries = 0;
+    // Consecutive steps whose reply produced no executable tool call although one was expected
+    // (empty `tool_calls` finish, or a `length` cut-off). Reset by any step that runs a tool.
+    let emptyTurnRecoveries = 0;
     const flushPendingSteers = (step: number): boolean => {
       if (this.steerQueue.length === 0) return false;
       const items = this.steerQueue.splice(0, this.steerQueue.length);
@@ -1211,7 +1217,30 @@ export class Agent {
 
       // A truncated tool call is not an executable instruction. Keep its visible text,
       // but never persist an unmatched protocol call or dispatch a partial side effect.
-      if (incomplete || (finishReason === "tool_calls" && streamed.toolCalls.length === 0)) {
+      const emptyToolCalls = finishReason === "tool_calls" && streamed.toolCalls.length === 0;
+      const cutOff = finishReason === "length";
+      if (
+        (emptyToolCalls || cutOff) &&
+        emptyTurnRecoveries < MAX_EMPTY_TURN_RECOVERIES &&
+        !signal?.aborted
+      ) {
+        // Gateways occasionally report `tool_calls` with the call name or arguments lost, and
+        // long tool arguments can hit the output cap. Neither is an answer: tell the model what
+        // happened and let it re-issue the call instead of ending the turn for the user.
+        emptyTurnRecoveries += 1;
+        if (!assistant.content) assistant.content = "[no valid tool call was received]";
+        this.messages.push({
+          role: "user",
+          content: emptyToolCalls
+            ? "[omr] Your last reply ended with finish_reason=tool_calls but no valid tool call reached the runtime (function name or arguments were lost). Re-issue the intended tool call now with a valid function name and complete JSON arguments, or continue the analysis."
+            : "[omr] Your last reply was cut off by the output limit before it finished. Continue exactly where you stopped. If you were writing a tool call, keep its arguments shorter (write large scripts to a file in several smaller calls).",
+        });
+        await this.options.trace?.("turn.recovery", {step, finishReason, attempt: emptyTurnRecoveries});
+        await this.options.historyCheckpoint?.(this.history, "turn-recovery");
+        stepBudget += 1; // a recovery must not eat the step budget
+        continue;
+      }
+      if (incomplete || emptyToolCalls) {
         return {
           text: latestText || richestText, steps: step, toolCalls: totalToolCalls,
           aborted: false, status: "partial", finishReason, usage: turnUsage,
@@ -1397,6 +1426,7 @@ export class Agent {
         });
       }
 
+      emptyTurnRecoveries = 0;
       flushPendingSteers(step);
       await this.options.historyCheckpoint?.(this.history, "tool-results");
       await events.onCheckpoint?.();

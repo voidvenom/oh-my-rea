@@ -14,6 +14,7 @@ import {
   readStoredModelConfig,
   resolveModelConfig,
   saveDefaultModelConfig,
+  saveReasoningEffortDefault,
   saveModelRuntimeSettings,
   splitProviderModelSpec,
   withModelId,
@@ -666,6 +667,19 @@ export class ModelController {
       selectedModel,
       savedPath: saved.path,
     };
+  }
+
+  /**
+   * Remember an effort the user picked so the next launch starts with it. Best effort: a read-only or
+   * unwritable config must never break the live selection. Profiles and custom commands do not call this.
+   */
+  rememberEffort(effort: ReasoningEffort): void {
+    try {
+      saveReasoningEffortDefault(effort, this.env);
+      this.storedModelConfig = readStoredModelConfig(this.env);
+    } catch {
+      // Selection stays active for this session.
+    }
   }
 
   applyEffortSelection(

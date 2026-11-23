@@ -1121,16 +1121,11 @@ export const writeOperatorDirective = async (
   return { agentsPath, sessionDirectivePath, backupPath };
 };
 
-/** Instruction files are prompt text on every turn, so they are bounded; the cut is reported, never silent. */
-export const PROJECT_INSTRUCTIONS_LIMIT = 24_000;
-
 export interface ProjectInstructions {
   readonly path: string;
-  /** Instruction text (omr's own managed `/jb` block removed), cut at {@link PROJECT_INSTRUCTIONS_LIMIT}. */
+  /** Full instruction text (omr's own managed `/jb` block removed); never cut. */
   readonly text: string;
-  /** Length of the full text before any cut. */
   readonly chars: number;
-  readonly truncated: boolean;
 }
 
 const stripManagedDirectiveBlock = (raw: string): string => {
@@ -1147,13 +1142,7 @@ const toProjectInstructions = (
 ): ProjectInstructions | null => {
   const text = stripManagedDirectiveBlock(raw).replace(/\r\n/g, "\n").trim();
   if (!text) return null;
-  const truncated = text.length > PROJECT_INSTRUCTIONS_LIMIT;
-  return {
-    path,
-    text: truncated ? text.slice(0, PROJECT_INSTRUCTIONS_LIMIT) : text,
-    chars: text.length,
-    truncated,
-  };
+  return { path, text, chars: text.length };
 };
 
 const instructionCache = new Map<

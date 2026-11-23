@@ -26,7 +26,6 @@ import {
   renderStringMatches,
 } from "../../render.js";
 import {
-  PROJECT_INSTRUCTIONS_LIMIT,
   readInstructionFile,
   readOperatorDirective,
   readProjectInstructions,
@@ -372,8 +371,7 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
     const arg = rest.trim();
     const lower = arg.toLowerCase();
     const projectPath = join(ctx.cwd, "AGENTS.md");
-    const sizeNote = (info: { chars: number; truncated: boolean }): string =>
-      `${info.chars} chars${info.truncated ? ` (only the first ${PROJECT_INSTRUCTIONS_LIMIT} are sent; shorten the file)` : ""}`;
+    const sizeNote = (info: { chars: number }): string => `${info.chars} chars`;
     const status = (): void => {
       const info = readProjectInstructions(ctx.cwd);
       const text = !ctx.agentsMdEnabled
@@ -387,7 +385,6 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
           enabled: ctx.agentsMdEnabled,
           path: info?.path ?? null,
           chars: info?.chars ?? 0,
-          truncated: info?.truncated ?? false,
         },
         text,
       );
@@ -441,7 +438,6 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
       {
         adopted: resolved,
         chars: adopted.chars,
-        truncated: adopted.truncated,
         agents_path: written.agentsPath,
       },
       [
@@ -761,6 +757,7 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
         return;
       }
       const { savedPath } = mc.applyEffortSelection(parsedEffort, saveFlag);
+      mc.rememberEffort(parsedEffort);
       const savedSuffix = savedPath ? ` (saved default → ${savedPath})` : "";
       ctx.output.commandResult(
         "effort",

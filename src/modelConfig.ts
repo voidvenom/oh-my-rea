@@ -162,7 +162,7 @@ export const readStoredModelConfig = (
   }
 };
 
-const DEFAULT_AUTO_EXTEND_STEPS = 2;
+const DEFAULT_AUTO_EXTEND_STEPS = 50;
 
 const envPositiveInt = (raw: string | undefined): number | null => {
   if (!raw) return null;
@@ -334,7 +334,7 @@ const limitsFrom = (
   return {
     maxTokens: Math.max(64, Math.trunc(maxTokens)),
     maxSteps: Math.max(1, Math.trunc(maxSteps)),
-    autoExtendSteps: Math.max(0, Math.min(10, Math.trunc(autoExtendSteps))),
+    autoExtendSteps: Math.max(0, Math.min(1_000, Math.trunc(autoExtendSteps))),
     timeoutMs: Math.max(1_000, Math.trunc(timeoutMs)),
     temperature,
     reasoningEffort,
@@ -584,6 +584,27 @@ export const saveDefaultModelConfig = (
   writeFileSync(staging, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
   renameSync(staging, path);
   return { path, backupPath };
+};
+
+/**
+ * Remember the user's thinking-effort choice for the next launch by updating only `reasoning_effort`
+ * in `~/.config/rea/omr-model.json` (atomic write, every other key kept, no per-change backup noise).
+ */
+export const saveReasoningEffortDefault = (
+  effort: ReasoningEffort,
+  env: NodeJS.ProcessEnv = process.env,
+): string => {
+  const path = modelConfigPath(env);
+  const existing = readStoredModelConfig(env) ?? {};
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const staging = `${path}.${process.pid}.tmp`;
+  writeFileSync(
+    staging,
+    `${JSON.stringify({ ...existing, reasoning_effort: effort }, null, 2)}\n`,
+    { mode: 0o600 },
+  );
+  renameSync(staging, path);
+  return path;
 };
 
 /**

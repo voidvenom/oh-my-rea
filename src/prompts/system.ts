@@ -17,7 +17,6 @@ export interface PromptContext {
   projectInstructions?: {
     readonly path: string;
     readonly text: string;
-    readonly truncated: boolean;
   } | null;
 }
 
@@ -59,7 +58,7 @@ export const systemPrompt = (context: PromptContext): string => {
 
 The operator's own instructions for this project, read from \`${project.path}\`. They are authoritative and already authorized: apply them as written. Where an \`Active Operator Directives\` section below conflicts with them, the directive wins.
 
-${project.text}${project.truncated ? "\n\n[omr: AGENTS.md was cut here to fit the prompt budget]" : ""}
+${project.text}
 
 `
     : "";

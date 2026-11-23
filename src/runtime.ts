@@ -14,7 +14,7 @@ import { registerSessionHandlers } from "./runtime/handlers/sessionHandlers.js";
 import { registerSystemHandlers } from "./runtime/handlers/systemHandlers.js";
 import { registerWorkflowHandlers } from "./runtime/handlers/workflowHandlers.js";
 import { OutputSink } from "./runtime/output.js";
-import { PROJECT_INSTRUCTIONS_LIMIT, createSession } from "./session.js";
+import { createSession } from "./session.js";
 import {
   detectTarget,
   listTargetCandidates,
@@ -194,7 +194,6 @@ export const runOmr = async (
     output.emit("agents.loaded", {
       path: startupInstructions.path,
       chars: startupInstructions.chars,
-      truncated: startupInstructions.truncated,
     });
   }
   if (!uiEnabled && !opts.json) {
@@ -281,6 +280,7 @@ export const runOmr = async (
         void ctx.modelController
           .applyModelSelection(providerId, nextModel, saveDefault, effort)
           .then(({ savedPath }) => {
+            ctx.modelController.rememberEffort(effort);
             const effTag = effort !== "auto" ? ` · thinking **${effort}**` : "";
             ui.addSystem(
               savedPath
@@ -301,6 +301,7 @@ export const runOmr = async (
             effort,
             saveDefault,
           );
+          ctx.modelController.rememberEffort(effort);
           ui.addSystem(
             savedPath
               ? `Thinking effort → **${effort}** *(saved default in \`${savedPath}\`)*`
@@ -348,7 +349,7 @@ export const runOmr = async (
     ui.start();
     if (startupInstructions) {
       ui.addSystem(
-        `loaded **AGENTS.md** (${startupInstructions.chars} chars${startupInstructions.truncated ? `, cut to ${PROJECT_INSTRUCTIONS_LIMIT}` : ""}) — re-read automatically when it changes · /agents.md for details`,
+        `loaded **AGENTS.md** (${startupInstructions.chars} chars) — re-read automatically when it changes · /agents.md for details`,
       );
     }
     if (ctx.activeProfile) {

@@ -308,7 +308,12 @@ const MAX_OUTPUT_CHARS = 256_000;
 const MAX_TIMELINE_ENTRIES = 600;
 const MAX_TIMELINE_CHARS = 1_500_000;
 const DOUBLE_ENTER_STEER_WINDOW_MS = 650;
-const PASTE_SAFETY_TIMEOUT_MS = 150;
+/** Inactivity gap after which an unterminated bracketed paste is flushed (large pastes arrive in bursts while the UI repaints). */
+const PASTE_SAFETY_TIMEOUT_MS = 2_000;
+/** How long an incomplete escape sequence is held waiting for its continuation before a lone ESC is treated as the Esc key. */
+const ESC_SEQUENCE_WAIT_MS = 40;
+/** Bare Ctrl+C while a turn is running only arms; a second press within this window interrupts. */
+const BUSY_CTRL_C_WINDOW_MS = 2_200;
 const MAX_STAGED_IMAGES = 6;
 const EVIDENCE_ID_EXTRACT_RE = /\bev_[0-9a-f]{64}\b/g;
 
@@ -516,6 +521,8 @@ export class TerminalUi {
   private pasteMode = false;
   private pasteBuffer = "";
   private pasteSafetyTimer: NodeJS.Timeout | null = null;
+  private escCarry = "";
+  private escCarryTimer: NodeJS.Timeout | null = null;
 
   private queuedSteers: readonly string[] = [];
   private stagedImages: ClipboardImageAttachment[] = [];
@@ -778,6 +785,8 @@ export class TerminalUi {
       clearTimeout(this.pasteSafetyTimer);
       this.pasteSafetyTimer = null;
     }
+    this.clearEscCarryTimer();
+    this.escCarry = "";
     if (this.clipboardNoticeTimer) {
       clearTimeout(this.clipboardNoticeTimer);
       this.clipboardNoticeTimer = null;
@@ -1525,18 +1534,38 @@ export class TerminalUi {
     this.pasteSafetyTimer.unref?.();
   }
 
-  private handleText(input: string): void {
+  private clearEscCarryTimer(): void {
+    if (this.escCarryTimer) {
+      clearTimeout(this.escCarryTimer);
+      this.escCarryTimer = null;
+    }
+  }
+
+  /**
+   * `final` is set only by the escape-wait timer: whatever is left is then interpreted as typed
+   * (a lone ESC becomes the Esc key). Otherwise an incomplete escape sequence at the end of a
+   * chunk is held and joined with the next chunk, so a mouse/arrow/paste marker split across
+   * reads can never turn into a phantom Esc (which cancels the running turn) or stray text.
+   */
+  private handleText(input: string, final = false): void {
     let text = input;
+    if (this.escCarry && !this.pasteMode) {
+      text = this.escCarry + text;
+      this.escCarry = "";
+    }
+    this.clearEscCarryTimer();
     while (text.length > 0) {
       if (this.pasteMode) {
-        const end = text.indexOf(`${ESC}201~`);
+        // Search the joined buffer so a closing marker split across chunks is still found.
+        const joined = this.pasteBuffer + text;
+        const end = joined.indexOf(`${ESC}201~`);
         if (end < 0) {
-          this.pasteBuffer += text;
+          this.pasteBuffer = joined;
           this.armPasteSafetyTimer();
           return;
         }
-        this.pasteBuffer += text.slice(0, end);
-        text = text.slice(end + 6);
+        this.pasteBuffer = joined.slice(0, end);
+        text = joined.slice(end + 6);
         this.flushPasteBuffer();
         continue;
       }
@@ -1617,6 +1646,20 @@ export class TerminalUi {
           this.handleKey(match[0]);
           text = text.slice(match[0].length);
           continue;
+        }
+        if (
+          !final &&
+          /^\x1b(?:\x1b)?(?:\[\[?[0-9;?<]*|O)?$/.test(text)
+        ) {
+          this.escCarry = text;
+          this.escCarryTimer = setTimeout(() => {
+            this.escCarryTimer = null;
+            const carried = this.escCarry;
+            this.escCarry = "";
+            if (carried) this.handleText(carried, true);
+          }, ESC_SEQUENCE_WAIT_MS);
+          this.escCarryTimer.unref?.();
+          return;
         }
         this.handleKey("\x1b");
         text = text.slice(1);
@@ -2043,6 +2086,12 @@ export class TerminalUi {
       case "\x1b[27;5;86~":
         void this.pasteFromClipboard(true);
         return;
+      case "\x1b[2;2~": // Shift+Insert (classic text paste)
+        void this.pasteFromClipboard(false);
+        return;
+      case "\x1b[2;5~": // Ctrl+Insert (classic copy)
+        this.copySelectionOrLastOutput();
+        return;
       case "\x1bv": // Alt+V / Ctrl+Shift+V (text paste)
       case "\x1b[118;6u":
       case "\x1b[86;6u":
@@ -2227,8 +2276,15 @@ export class TerminalUi {
           return;
         }
         if (this.busy) {
-          this.options.onInterrupt();
-          return;
+          // A stray Ctrl+C (e.g. meant as "copy" for a terminal-native selection) must not kill a
+          // long-running turn: the first press arms, the second within the window interrupts.
+          if (Date.now() < this.ctrlCArmedUntil) {
+            this.ctrlCArmedUntil = 0;
+            this.options.onInterrupt();
+            return;
+          }
+          this.ctrlCArmedUntil = Date.now() + BUSY_CTRL_C_WINDOW_MS;
+          break;
         }
         if (this.paletteOpen) {
           this.paletteOpen = false;
@@ -4630,7 +4686,7 @@ export class TerminalUi {
         this.binaryMode !== "off"
           ? `${renderBinaryPulse(this.tick, this.status.magic?.bytes ?? null, t, 6)} `
           : "";
-      rightRendered = `${pulse}${t.neonCyan}${spin} ${this.busy}${elapsed}${t.reset} ${t.muted}(esc cancel)${t.reset}`;
+      rightRendered = `${pulse}${t.neonCyan}${spin} ${this.busy}${elapsed}${t.reset} ${Date.now() < this.ctrlCArmedUntil ? `${t.amber}${t.bold}ctrl+c again to stop${t.reset}` : `${t.muted}(esc cancel)${t.reset}`}`;
     } else if (Date.now() < this.ctrlCArmedUntil) {
       rightRendered = `${t.amber}${t.bold}! ctrl+c again to exit${t.reset}`;
     } else {
