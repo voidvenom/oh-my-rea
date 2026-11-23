@@ -2,10 +2,14 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { test } from "node:test";
 import { whatsNew } from "../dist/changelog.js";
+import { fixtureEnvironment } from "../scripts/fixture-environment.mjs";
+
+const ptyProbe = fileURLToPath(new URL("../bench/pty-probe.py", import.meta.url));
 
 test("PTY startup accepts typed-ahead Enter during a slow update check, and 0.5.1 sees 0.6.0 on the next start", {
   skip: process.platform === "win32",
@@ -18,7 +22,7 @@ test("PTY startup accepts typed-ahead Enter during a slow update check, and 0.5.
     const preload = join(root, "preload.mjs");
     const dist = join(root, "dist");
     await cp(new URL("../dist/", import.meta.url), dist, { recursive: true });
-    await symlink(resolve("node_modules"), join(root, "node_modules"), "dir");
+    await symlink(fileURLToPath(new URL("../node_modules", import.meta.url)), join(root, "node_modules"), "dir");
     await writeFile(join(root, "package.json"), '{"type":"module"}');
     await writeFile(join(dist, "version.js"), 'export const VERSION = "0.5.1";\n');
     await writeFile(preload, `
@@ -40,13 +44,13 @@ test("PTY startup accepts typed-ahead Enter during a slow update check, and 0.5.
       };
     `);
     const env = {
-      ...process.env, XDG_CONFIG_HOME: config, OMR_SESSIONS_DIR: join(root, "sessions"),
+      ...fixtureEnvironment(), HOME: root, XDG_CONFIG_HOME: config, OMR_SESSIONS_DIR: join(root, "sessions"),
       OMR_SKIP_SETUP: "1", OMR_REA_COMMAND: join(root, "missing-rea"),
     };
     const notice = "Update available: omr 0.5.1 → 0.6.0";
     const probe = async (options, overrides = {}) => {
       const { stdout } = await promisify(execFile)("python3", [
-        resolve("bench/pty-probe.py"), "--after-alt", "--timeout", "3",
+        ptyProbe, "--after-alt", "--timeout", "3",
         "--mark", "help=GUIDED WORKFLOWS", "--mark", `notice=${notice}`, ...options,
         "--", process.execPath, "--import", preload, join(dist, "main.js"), "--no-model",
       ], { cwd: root, env: { ...env, ...overrides }, timeout: 8000 });
@@ -54,7 +58,7 @@ test("PTY startup accepts typed-ahead Enter during a slow update check, and 0.5.
     };
 
     const first = await probe(["--type", "/help\r"]);
-    assert.ok(first.altScreenMs !== null && first.marks.help !== null);
+    assert.ok(first.altScreenMs !== null && first.marks.help !== null, JSON.stringify(first));
     assert.equal(first.marks.notice, null);
     assert.equal(JSON.parse(await readFile(cache, "utf8")).latest["oh-my-rea"], "0.6.0");
     assert.ok(first.marks.help - first.altScreenMs < 600, "the slow cache read did not hold the first command");

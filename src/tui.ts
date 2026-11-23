@@ -26,6 +26,8 @@ import {
 } from "./binaryArt.js";
 import { summarizeToolCall } from "./broker.js";
 import { normalizeTypedAhead, takeEarlyInput } from "./earlyInput.js";
+import { I18n, type MessageKey } from "./i18n/index.js";
+import { ledgerHealthLabel } from "./render.js";
 import {
   copyTextToClipboard,
   isKlipperImagePlaceholder,
@@ -37,7 +39,7 @@ import {
   type ClipboardImageAttachment,
   type RawClipboardImage,
 } from "./clipboard.js";
-import type { CommandKind, PaletteSubArg } from "./commands.js";
+import { localizeCommand, type CommandKind, type PaletteSubArg } from "./commands.js";
 import { formatTokenCountShort } from "./compaction.js";
 import type { ChatImageBlock, ChatMessage } from "./model.js";
 import {
@@ -61,6 +63,7 @@ export interface UiCommand {
   readonly usage?: string;
   readonly shortcut?: string;
   readonly description: string;
+  readonly source?: "builtin" | "custom";
   readonly pathCompletion?: boolean;
   readonly paletteArgs?: readonly PaletteSubArg[];
 }
@@ -125,6 +128,7 @@ export interface UiSubmitOptions {
 
 export interface UiOptions {
   commands: readonly UiCommand[];
+  i18n?: I18n;
   cwd?: string;
   theme?: ColorTheme;
   providers?: () => readonly ResolvedProvider[];
@@ -169,6 +173,7 @@ interface ToolCallItem {
 interface EntryRenderCache {
   readonly width: number;
   readonly rev: number;
+  readonly language: I18n["language"];
   readonly lines: readonly string[];
 }
 
@@ -198,7 +203,7 @@ type TimelineEntry =
       rev: number;
       cache?: EntryRenderCache;
     }
-  | { kind: "system"; text: string; rev: number; cache?: EntryRenderCache }
+  | { kind: "system"; text: string; rev: number; startup?: boolean; cache?: EntryRenderCache }
   | { kind: "error"; text: string; rev: number; cache?: EntryRenderCache };
 
 interface ViewportSelection {
@@ -311,10 +316,17 @@ const MAX_TIMELINE_CHARS = 240_000;
 const MAX_ENTRY_CHARS = 8_000;
 const MAX_TOOL_GROUP = 16;
 
-const timelineText = (text: string): string => {
+const paletteBadgeKeys = {
+  FLOW: "badge.flow", ASK: "badge.prompt", LOCAL: "badge.local", ARG: "badge.args",
+  DIR: "badge.dir", FILE: "badge.file", NOW: "badge.now", MODE: "badge.mode",
+  DFLT: "badge.default", CONN: "badge.connected", SETUP: "badge.setup", THINK: "badge.thinking",
+  UI: "badge.ui", IMG: "badge.image", BIN: "badge.binary", LIVE: "badge.live",
+} satisfies Record<string, MessageKey>;
+
+const timelineText = (i18n: I18n, text: string): string => {
   if (text.length <= MAX_ENTRY_CHARS) return sanitizeText(text);
   const slice = Math.floor(MAX_ENTRY_CHARS / 2) - 24;
-  return sanitizeText(`${text.slice(0, slice)}\n… [transcript preview] …\n${text.slice(-slice)}`);
+  return sanitizeText(`${text.slice(0, slice)}\n… ${i18n.t("timeline.preview")} …\n${text.slice(-slice)}`);
 };
 const DOUBLE_ENTER_STEER_WINDOW_MS = 650;
 /** Inactivity gap after which an unterminated bracketed paste is flushed (large pastes arrive in bursts while the UI repaints). */
@@ -556,17 +568,24 @@ export class TerminalUi {
   private prevCols = 0;
 
   private commandsList: readonly UiCommand[];
+  private readonly i18n: I18n;
 
   constructor(private readonly options: UiOptions) {
+    this.i18n = options.i18n ?? new I18n();
     this.theme = options.theme ?? createTheme();
     this.cwd = options.cwd ?? process.cwd();
-    this.commandsList = options.commands;
+    this.commandsList = options.commands.map((command) => localizeCommand(command, this.i18n));
   }
 
   setCommands(commands: readonly UiCommand[]): void {
-    this.commandsList = commands;
+    this.commandsList = commands.map((command) => localizeCommand(command, this.i18n));
     this.syncPalette();
     this.schedule();
+  }
+
+  private paletteBadge(badge: string): string {
+    const key = paletteBadgeKeys[badge as keyof typeof paletteBadgeKeys];
+    return key ? this.i18n.t(key) || badge : badge;
   }
 
   get currentBinaryMode(): BinaryFlowMode {
@@ -642,7 +661,7 @@ export class TerminalUi {
     this.picker.query = "";
     this.picker.loading = loading;
     this.picker.notice =
-      "Pick a dedicated AI model for compaction, or choose 'active' so your primary model compacts too.";
+      this.i18n.t("picker.compactionHelp");
     this.paletteOpen = false;
     this.outputExpanded = false;
     this.picker.selectedTab = 0;
@@ -965,7 +984,7 @@ export class TerminalUi {
     }
     this.stagedImages.push(attachment);
     this.setClipboardNotice(
-      `📎 ${attachment.label} eklendi · boş satırda Backspace ile kaldır`,
+      this.i18n.t("clipboard.added", { label: attachment.label }),
     );
     this.paint();
   }
@@ -1012,21 +1031,21 @@ export class TerminalUi {
   addUser(text: string): void {
     this.closeActiveStreams();
     this.outputDrawerOpen = false;
-    this.timeline.push({ kind: "user", text: timelineText(text), rev: 1 });
+    this.timeline.push({ kind: "user", text: timelineText(this.i18n, text), rev: 1 });
     this.trimTimeline();
     this.scroll = 0;
     this.paint();
   }
 
-  addSystem(text: string): void {
-    this.timeline.push({ kind: "system", text: timelineText(text), rev: 1 });
+  addSystem(text: string, startup = false): void {
+    this.timeline.push({ kind: "system", text: timelineText(this.i18n, text), rev: 1, startup });
     this.trimTimeline();
     this.scroll = 0;
     this.paint();
   }
 
   addError(text: string): void {
-    this.timeline.push({ kind: "error", text: timelineText(text), rev: 1 });
+    this.timeline.push({ kind: "error", text: timelineText(this.i18n, text), rev: 1 });
     this.trimTimeline();
     this.scroll = 0;
     this.paint();
@@ -1050,7 +1069,7 @@ export class TerminalUi {
     if (!clean) return;
     const chunkWords = clean.trim() ? clean.trim().split(/\s+/).length : 0;
     this.reasoningEntry.words += chunkWords;
-    this.reasoningEntry.text = timelineText(this.reasoningEntry.text + clean);
+    this.reasoningEntry.text = timelineText(this.i18n, this.reasoningEntry.text + clean);
     this.reasoningEntry.rev += 1;
     this.scroll = 0;
     this.schedule();
@@ -1081,7 +1100,7 @@ export class TerminalUi {
       this.streamEndedWithCr && delta.startsWith("\n") ? delta.slice(1) : delta;
     this.streamEndedWithCr = delta.endsWith("\r");
     if (slice.length > 0) {
-      this.streamEntry.text = timelineText(this.streamEntry.text + slice);
+      this.streamEntry.text = timelineText(this.i18n, this.streamEntry.text + slice);
       this.streamEntry.rev += 1;
     }
     this.scroll = 0;
@@ -1094,7 +1113,7 @@ export class TerminalUi {
     if (!this.streamEntry && text.trim().length > 0) {
       this.timeline.push({
         kind: "assistant",
-        text: timelineText(text),
+        text: timelineText(this.i18n, text),
         streaming: false,
         meta: meta ?? null,
         rev: 1,
@@ -1107,7 +1126,7 @@ export class TerminalUi {
     this.streamEntry = null;
     if (!entry) return;
     entry.streaming = false;
-    if (text) entry.text = timelineText(text);
+    if (text) entry.text = timelineText(this.i18n, text);
     if (meta !== undefined) entry.meta = meta;
     entry.rev += 1;
     if (entry.text.trim().length === 0) {
@@ -1206,7 +1225,7 @@ export class TerminalUi {
   showOutput(label: string, text: string, options?: { expanded: boolean }): void {
     const capped =
       !options?.expanded && text.length > MAX_OUTPUT_CHARS
-        ? `${text.slice(0, MAX_OUTPUT_CHARS)}\n… (${text.length - MAX_OUTPUT_CHARS} chars omitted in UI; use /export for complete artifact)`
+        ? `${text.slice(0, MAX_OUTPUT_CHARS)}\n${this.i18n.t("drawer.capped", { count: text.length - MAX_OUTPUT_CHARS })}`
         : text;
     this.output = { label, text: sanitizeText(capped) };
     this.outputWrapCache = null;
@@ -1251,12 +1270,7 @@ export class TerminalUi {
     this.selection = null;
 
     // Preserve initial startup notices (AGENTS.md / active profile) at the very top
-    const startupNotices = this.timeline.filter(
-      (entry) =>
-        entry.kind === "system" &&
-        (entry.text.startsWith("loaded **AGENTS.md**") ||
-          entry.text.startsWith("active profile ")),
-    );
+    const startupNotices = this.timeline.filter((entry) => entry.kind === "system" && entry.startup);
     this.timeline = [...startupNotices];
 
     // Map tool_call_id -> tool result message for pairing status, duration, and Evidence IDs
@@ -1271,7 +1285,7 @@ export class TerminalUi {
       if (msg.role === "system" || msg.role === "tool") continue;
 
       if (msg.role === "user") {
-        const rawContent = typeof msg.content === "string" ? timelineText(msg.content) : "";
+        const rawContent = typeof msg.content === "string" ? timelineText(this.i18n, msg.content) : "";
         const cleaned = stripInternalPromptNotes(rawContent);
         if (!cleaned && (!msg.images || msg.images.length === 0)) continue;
 
@@ -1292,7 +1306,7 @@ export class TerminalUi {
 
         const promptLabel =
           msg.images && msg.images.length > 0
-            ? `${cleaned || "(görsel)"} [📎 ×${msg.images.length}]`
+            ? `${cleaned || this.i18n.t("ui.imageOnly")} [📎 ×${msg.images.length}]`
             : cleaned;
         this.timeline.push({
           kind: "user",
@@ -1319,7 +1333,7 @@ export class TerminalUi {
           }
         }
         if (reasoningParts.length > 0) {
-          const thoughtText = timelineText(reasoningParts.join("\n\n"));
+          const thoughtText = timelineText(this.i18n, reasoningParts.join("\n\n"));
           const words = thoughtText
             .trim()
             .split(/\s+/)
@@ -1339,7 +1353,7 @@ export class TerminalUi {
         if (typeof msg.content === "string" && msg.content.trim().length > 0) {
           this.timeline.push({
             kind: "assistant",
-            text: timelineText(msg.content).replace(/^\n+/, ""),
+            text: timelineText(this.i18n, msg.content).replace(/^\n+/, ""),
             streaming: false,
             meta: null,
             rev: 1,
@@ -1857,7 +1871,7 @@ export class TerminalUi {
           if (selected.trim().length > 0) {
             this.writeToClipboard(selected);
             this.setClipboardNotice(
-              `✓ seçilen metin kopyalandı (${selected.length} krk)`,
+              this.i18n.t("clipboard.selection", { count: selected.length }),
             );
           }
         } else {
@@ -1939,7 +1953,7 @@ export class TerminalUi {
       if (selected) {
         this.writeToClipboard(selected);
         this.setClipboardNotice(
-          `✓ seçilen metin kopyalandı (${selected.length} krk)`,
+          this.i18n.t("clipboard.selection", { count: selected.length }),
         );
       }
       this.paint();
@@ -1951,7 +1965,7 @@ export class TerminalUi {
         const plain = stripAnsi(entry.text).trim();
         this.writeToClipboard(plain);
         this.setClipboardNotice(
-          `✓ son yanıt kopyalandı (${plain.length} krk)`,
+          this.i18n.t("clipboard.answer", { count: plain.length }),
         );
         this.paint();
         return;
@@ -1961,7 +1975,7 @@ export class TerminalUi {
       const plain = stripAnsi(this.output.text).trim();
       this.writeToClipboard(plain);
       this.setClipboardNotice(
-        `✓ çıktı kopyalandı (${plain.length} krk)`,
+        this.i18n.t("clipboard.output", { count: plain.length }),
       );
       this.paint();
     }
@@ -2019,7 +2033,7 @@ export class TerminalUi {
           return;
         }
       }
-      this.setClipboardNotice("⚠ panoda görsel veya metin bulunamadı");
+      this.setClipboardNotice(this.i18n.t("clipboard.empty"));
       this.paint();
     } catch {
       // Ignore clipboard read errors
@@ -2398,7 +2412,7 @@ export class TerminalUi {
     const tabs: PickerTab[] = [
       {
         id: "all",
-        label: "All Connected",
+        label: this.i18n.t("picker.all"),
         connected: connectedPool.length > 0,
         local: false,
         modelCount: allCount,
@@ -2492,12 +2506,12 @@ export class TerminalUi {
         ) ??
         this.picker.providers.find((p) => p.connected) ??
         this.picker.providers[0];
-      const inheritLabel = `active (${this.picker.activeProviderId ? `${this.picker.activeProviderId}:` : ""}${this.picker.activeModelId || "primary model"})`;
+      const inheritLabel = `active (${this.picker.activeProviderId ? `${this.picker.activeProviderId}:` : ""}${this.picker.activeModelId || this.i18n.t("picker.primary")})`;
       if (
         activeProv &&
         (tokens.length === 0 ||
           tokens.every((tok) =>
-            `active default primary ${inheritLabel}`
+            this.i18n.t("picker.activeDefault", { model: inheritLabel })
               .toLowerCase()
               .includes(tok),
           ))
@@ -2671,7 +2685,7 @@ export class TerminalUi {
       case "\x1br": // Alt+R
         this.picker.loading = true;
         this.picker.notice =
-          "Refreshing live /models from connected endpoints…";
+          this.i18n.t("picker.refreshing");
         this.syncFlowTimer();
         this.paint();
         this.options.onRefreshModels?.();
@@ -2766,7 +2780,7 @@ export class TerminalUi {
     if (!selected) {
       const tab = this.pickerTabs()[this.picker.selectedTab];
       if (tab?.provider && !tab.provider.connected && !tab.provider.local) {
-        this.picker.notice = `Not connected: export ${tab.provider.envHint} in your shell first.`;
+        this.picker.notice = this.i18n.t("picker.needsKey", { key: tab.provider.envHint });
         this.paint();
       }
       return;
@@ -2783,12 +2797,12 @@ export class TerminalUi {
       return;
     }
     if (!selected.provider.connected && !selected.provider.local) {
-      this.picker.notice = `Not connected: export ${selected.provider.envHint} first to activate ${selected.provider.name}.`;
+      this.picker.notice = this.i18n.t("picker.needsProviderKey", { key: selected.provider.envHint, provider: selected.provider.name });
       this.paint();
       return;
     }
     if (!selected.provider.baseUrl) {
-      this.picker.notice = `Missing endpoint URL: set ${selected.provider.envHint} first.`;
+      this.picker.notice = this.i18n.t("picker.needsUrl", { key: selected.provider.envHint });
       this.paint();
       return;
     }
@@ -2840,7 +2854,7 @@ export class TerminalUi {
     if (this.cursor === 0) {
       if (this.composer.length === 0 && this.stagedImages.length > 0) {
         const removed = this.stagedImages.pop()!;
-        this.setClipboardNotice(`📎 ${removed.label} kaldırıldı`);
+        this.setClipboardNotice(this.i18n.t("clipboard.removed", { label: removed.label }));
       }
       return;
     }
@@ -3004,6 +3018,13 @@ export class TerminalUi {
     if (!cmd) return null;
     const arg = this.composer.slice(space + 1).trimStart();
     const q = arg.toLowerCase();
+    if (cmd.name === "lang") {
+      return (["en", "tr"] as const).filter((code) => code.startsWith(q)).map((code) => ({
+        kind: "arg", badge: code === this.i18n.language ? "NOW" : "ARG", badgeKind: "arg",
+        label: code, usage: "", description: this.i18n.t(code === "en" ? "language.english" : "language.turkish"),
+        completion: `/lang ${code}`, submitOnEnter: true,
+      }));
+    }
 
     if (cmd.paletteArgs && cmd.paletteArgs.length > 0) {
       if (arg.includes(" ")) return [];
@@ -3012,7 +3033,7 @@ export class TerminalUi {
           (item) =>
             !q ||
             item.id.toLowerCase().startsWith(q) ||
-            item.description.toLowerCase().includes(q),
+            this.i18n.lower(item.description).includes(this.i18n.lower(arg)),
         )
         .map((item) => {
           const submit = item.submitOnEnter ?? false;
@@ -3035,17 +3056,17 @@ export class TerminalUi {
       const modes: Array<{ mode: BinaryFlowMode; desc: string }> = [
         {
           mode: "on",
-          desc: "Continuous live binary & hex flow at all times (default)",
+          desc: this.i18n.t("palette.binaryOn"),
         },
         {
           mode: "eco",
-          desc: "Flows on terminal activity, rests after 3s idle",
+          desc: this.i18n.t("palette.binaryEco"),
         },
         {
           mode: "busy",
-          desc: "Animates only while model or REA tools are active",
+          desc: this.i18n.t("palette.binaryBusy"),
         },
-        { mode: "off", desc: "Disable binary animations & sidebar bitstream" },
+        { mode: "off", desc: this.i18n.t("palette.binaryOff") },
       ];
       return modes
         .filter(
@@ -3057,7 +3078,7 @@ export class TerminalUi {
           badgeKind: "arg" as const,
           label: m.mode,
           usage: "",
-          description: `${m.desc}${m.mode === this.binaryMode ? " · active" : ""}`,
+          description: `${m.desc}${m.mode === this.binaryMode ? this.i18n.t("palette.activeSuffix") : ""}`,
           completion: `/binary ${m.mode}`,
           submitOnEnter: true,
         }));
@@ -3076,7 +3097,7 @@ export class TerminalUi {
             label: `${prefix}active`,
             usage: "",
             description:
-              "Use the primary active model for compaction (default)",
+              this.i18n.t("palette.compactDefault"),
             completion: `/${cmd.name} ${prefix}active`,
             submitOnEnter: true,
           },
@@ -3098,7 +3119,7 @@ export class TerminalUi {
               badgeKind: p.connected ? "workflow" : "local",
               label: `${prefix}${spec}`,
               usage: "",
-              description: `Compact with ${p.name} (${m.id}), then continue with active model`,
+              description: this.i18n.t("palette.compactUsing", { provider: p.name, model: m.id }),
               completion: `/${cmd.name} ${prefix}${spec}`,
               submitOnEnter: cmd.name === "compaction",
             });
@@ -3117,33 +3138,33 @@ export class TerminalUi {
       }> = [
         {
           mode: "soft",
-          desc: "Summarize locally with the compaction/active model (skip server compaction)",
+          desc: this.i18n.t("palette.soft"),
         },
         {
           mode: "remote",
-          desc: "Summarize via OpenAI-compatible server compaction (/responses/compact), then fall back to local soft",
+          desc: this.i18n.t("palette.remote"),
         },
         {
           mode: "snapcompact",
-          desc: "Archive history onto dense 8x13 bitmap PNG images + plain-text Evidence ledger (no LLM call)",
+          desc: this.i18n.t("palette.snapcompact"),
         },
         {
           mode: "handoff",
-          desc: "Replace the whole context with a self-contained handoff document",
+          desc: this.i18n.t("palette.handoff"),
         },
         {
           mode: "shake",
-          desc: "No LLM: stub oversized tool outputs, keep every ev_/unk_ ID",
+          desc: this.i18n.t("palette.shake"),
         },
         {
           mode: "model",
-          desc: "Open interactive Compaction Model Picker — choose another connected AI for compaction",
+          desc: this.i18n.t("palette.compactPicker"),
           shortcut: "Alt+C",
           submit: true,
         },
       ];
       if (cmd.name === "compaction") {
-        modes.push({ mode: "off", desc: "Never compact automatically" });
+        modes.push({ mode: "off", desc: this.i18n.t("palette.neverCompact") });
       }
       const head = arg.split(/\s+/)[0] ?? "";
       const completed = arg.includes(" ");
@@ -3183,10 +3204,10 @@ export class TerminalUi {
           kind: "arg",
           badge: "UI",
           badgeKind: "arg",
-          label: "interactive thinking bar",
+          label: this.i18n.t("palette.effortPicker"),
           usage: "",
           shortcut: "Alt+E",
-          description: `Open Thinking Effort selector (current: ${this.status.effort})`,
+          description: this.i18n.t("palette.currentEffort", { effort: this.status.effort }),
           completion: "/effort",
           submitOnEnter: true,
         });
@@ -3195,7 +3216,7 @@ export class TerminalUi {
         if (
           effQuery &&
           !lvl.id.startsWith(effQuery) &&
-          !lvl.description.toLowerCase().includes(effQuery)
+          !this.i18n.lower(this.i18n.t(`effort.${lvl.id}`)).includes(this.i18n.lower(effQuery))
         ) {
           continue;
         }
@@ -3206,7 +3227,7 @@ export class TerminalUi {
           badgeKind: active ? "workflow" : "arg",
           label: lvl.id,
           usage: "",
-          description: `${lvl.description}${active ? " · active" : ""}`,
+          description: `${this.i18n.t(`effort.${lvl.id}`)}${active ? this.i18n.t("palette.activeSuffix") : ""}`,
           completion: `/effort ${savePrefix}${lvl.id}`,
           submitOnEnter: true,
         });
@@ -3222,10 +3243,10 @@ export class TerminalUi {
           kind: "arg",
           badge: "UI",
           badgeKind: "arg",
-          label: "interactive matrix",
+          label: this.i18n.t("palette.providerPicker"),
           usage: "",
           shortcut: "Alt+M",
-          description: `Open interactive Provider & Model Matrix (${providers.length} providers)`,
+          description: this.i18n.t("palette.providerPickerHint", { count: providers.length }),
           completion: "/providers",
           submitOnEnter: true,
         });
@@ -3240,10 +3261,10 @@ export class TerminalUi {
           label: p.id,
           usage: p.name,
           description: p.connected
-            ? `${p.models.length} models · ${p.keySource}`
+            ? this.i18n.t("palette.providerModels", { count: p.models.length, source: p.keySource })
             : p.local
-              ? `Local endpoint (${p.baseUrl})`
-              : `Export ${p.envHint}`,
+              ? this.i18n.t("palette.localEndpoint", { url: p.baseUrl })
+              : this.i18n.t("palette.exportKey", { key: p.envHint }),
           completion: `/providers ${p.id}`,
           submitOnEnter: true,
         });
@@ -3263,11 +3284,11 @@ export class TerminalUi {
             kind: "arg",
             badge: "UI",
             badgeKind: "arg",
-            label: "interactive selector",
+            label: this.i18n.t("palette.modelPicker"),
             usage: "",
             shortcut: "Alt+M",
             description:
-              "Open full-screen Provider & Model Picker with live search",
+              this.i18n.t("palette.modelPickerHint"),
             completion: "/model",
             submitOnEnter: true,
           },
@@ -3300,7 +3321,7 @@ export class TerminalUi {
             label: "endpoint",
             usage: "<base_url> [api_key_or_env] [default_model]",
             description:
-              "Configure custom endpoint URL + API key and fetch all its models",
+              this.i18n.t("palette.endpoint"),
             completion: "/model endpoint ",
             submitOnEnter: false,
           },
@@ -3381,8 +3402,8 @@ export class TerminalUi {
         label: candidate,
         usage: "",
         description: candidate.endsWith("/")
-          ? "Tab to browse directory"
-          : `Select for /${pathCtx.command.name}`,
+          ? this.i18n.t("palette.browseDirectory")
+          : this.i18n.t("palette.selectFor", { command: pathCtx.command.name }),
         completion: `${pathCtx.headPrefix}${candidate}`,
         submitOnEnter:
           !candidate.endsWith("/") && pathCtx.command.name !== "compare",
@@ -3405,7 +3426,7 @@ export class TerminalUi {
       else if (cmd.name.startsWith(query)) score = 800 - cmd.name.length;
       else if (names.some((n) => n.startsWith(query))) score = 700;
       else if (cmd.name.includes(query)) score = 500;
-      else if (cmd.description.toLowerCase().includes(query)) score = 300;
+      else if (this.i18n.lower(cmd.description).includes(this.i18n.lower(this.composer.slice(1)))) score = 300;
       if (score < 0) continue;
 
       const kind: CommandKind = cmd.kind ?? "local";
@@ -3548,7 +3569,7 @@ export class TerminalUi {
         : undefined;
 
     if (line) {
-      this.history.push(timelineText(line));
+      this.history.push(timelineText(this.i18n, line));
       if (this.history.length > 200) this.history.shift();
     }
     this.historyIndex = -1;
@@ -3648,7 +3669,7 @@ export class TerminalUi {
     // 1. Composer layout (3 to 8 rows total: top border + 1..6 input lines + bottom border)
     const maxComposerInner = Math.min(6, Math.max(1, Math.floor(rows * 0.25)));
     const promptPrefix = "❯ ";
-    const composerTextWidth = Math.max(6, cols - 4 - promptPrefix.length);
+    const composerTextWidth = Math.max(6, cols - 4 - visibleWidth(promptPrefix));
     const wrappedComposer = wrapComposerWithCursor(
       this.composer,
       this.cursor,
@@ -3771,17 +3792,17 @@ export class TerminalUi {
     const composerFocusedBorder =
       this.busy || hasStagedImages ? t.borderActive : t.border;
     const composerTitle = hasStagedImages
-      ? `prompt · 📎 ${this.stagedImages.length} görsel`
-      : "prompt";
+      ? this.i18n.t("composer.images", { count: this.stagedImages.length })
+      : this.i18n.t("composer.title");
     const composerRightHint = this.composer.includes("\n")
-      ? `${wrappedComposer.lines.length} lines · enter send`
+      ? this.i18n.t("composer.lines", { count: wrappedComposer.lines.length })
       : this.busy && this.queuedSteers.length > 0
-        ? "enter×2 şimdi gönder · alt+↑ düzenle · ctrl+v görsel/metin"
+        ? this.i18n.t("composer.queued")
         : this.busy
-          ? "enter sıraya al · enter×2 hemen gönder · ctrl+v yapıştır"
+          ? this.i18n.t("composer.busy")
           : hasStagedImages
-            ? "enter görseli gönder · backspace sil · ctrl+v ekle"
-            : "alt+m models · ctrl+v görsel/metin · / cmds";
+            ? this.i18n.t("composer.sendImage")
+            : this.i18n.t("composer.shortcuts");
     frame.push(
       this.renderBoxTop(
         cols,
@@ -3804,12 +3825,12 @@ export class TerminalUi {
       if (this.composer.length === 0 && i === 0) {
         if (hasStagedImages) {
           const imgSummary = this.stagedImages.map((img) => img.label).join(", ");
-          const placeholder = `📎 ${imgSummary} hazır — sorunuzu yazıp Enter'a basın (veya doğrudan Enter ile gönderin, Backspace siler)…`;
+          const placeholder = this.i18n.t("composer.imageReady", { images: imgSummary });
           content = `${t.neonCyan}${truncateAnsi(placeholder, composerTextWidth)}${t.reset}`;
         } else {
           const placeholder = this.status.target
-            ? `Ask about ${basenameOf(this.status.target)}, or type /triage, /investigate, /model…`
-            : "Ask omr anything, press Alt+M for models, or type /open <Tab>…";
+            ? this.i18n.t("composer.askTarget", { target: basenameOf(this.status.target) })
+            : this.i18n.t("composer.ask");
           content = `${t.muted}${truncateAnsi(placeholder, composerTextWidth)}${t.reset}`;
         }
       } else {
@@ -3845,7 +3866,7 @@ export class TerminalUi {
       composerTopRowIndex +
       2 +
       Math.max(0, Math.min(composerInnerHeight - 1, cursorLineInBox));
-    const cursorCol1Based = 3 + promptPrefix.length + wrappedComposer.col;
+    const cursorCol1Based = 3 + visibleWidth(promptPrefix) + wrappedComposer.col;
 
     return {
       lines: frame,
@@ -3870,7 +3891,7 @@ export class TerminalUi {
     const t = this.theme;
     const targetLabel = this.status.target
       ? basenameOf(this.status.target)
-      : "no target";
+      : this.i18n.t("hud.noTarget");
     const magicBadge = this.status.magic ? ` · ${this.status.magic.label}` : "";
     const pulseBits = cols >= 68 ? 8 : 6;
     const pulse =
@@ -3915,18 +3936,19 @@ export class TerminalUi {
 
   private renderViewportBottom(cols: number, hudWidth: number): string {
     const t = this.theme;
-    const scrollPill = this.scroll > 0 ? ` ↑${this.scroll} lines (PgDn) ` : "";
+    const scrollPill = this.scroll > 0 ? this.i18n.t("hud.scrolled", { count: this.scroll }) : "";
+    const scrollWidth = visibleWidth(scrollPill);
     if (hudWidth === 0) {
-      if (scrollPill && cols > scrollPill.length + 6) {
-        const fill = Math.max(0, cols - 2 - scrollPill.length - 1);
+      if (scrollPill && cols > scrollWidth + 6) {
+        const fill = Math.max(0, cols - 2 - scrollWidth - 1);
         return `${t.border}╰${hline(fill)}${t.reset}${t.amber}${scrollPill}${t.reset}${t.border}─╯${t.reset}`;
       }
       return `${t.border}╰${hline(cols - 2)}╯${t.reset}`;
     }
     const leftSpan = Math.max(0, cols - hudWidth - 2);
     const rightSpan = Math.max(0, hudWidth - 1);
-    if (scrollPill && leftSpan > scrollPill.length + 4) {
-      const fill = Math.max(0, leftSpan - scrollPill.length - 1);
+    if (scrollPill && leftSpan > scrollWidth + 4) {
+      const fill = Math.max(0, leftSpan - scrollWidth - 1);
       return `${t.border}╰${hline(fill)}${t.reset}${t.amber}${scrollPill}${t.reset}${t.border}─┴${hline(rightSpan)}╯${t.reset}`;
     }
     return `${t.border}╰${hline(leftSpan)}┴${hline(rightSpan)}╯${t.reset}`;
@@ -3940,9 +3962,11 @@ export class TerminalUi {
     titleColor: string,
   ): string {
     const t = this.theme;
-    const left = `${borderColor}╭─ ${t.reset}${titleColor}${t.bold}${title}${t.reset}${borderColor} `;
-    const right = hint
-      ? `${t.reset}${t.muted} ${hint} ${borderColor}─╮${t.reset}`
+    const titleBudget = hint ? Math.floor(cols * 0.55) : cols - 6;
+    const left = `${borderColor}╭─ ${t.reset}${titleColor}${t.bold}${truncateAnsi(title, titleBudget)}${t.reset}${borderColor} `;
+    const fittedHint = truncateAnsi(hint, Math.max(0, cols - visibleWidth(left) - 5));
+    const right = fittedHint
+      ? `${t.reset}${t.muted} ${fittedHint} ${borderColor}─╮${t.reset}`
       : `─╮${t.reset}`;
     const fill = Math.max(0, cols - visibleWidth(left) - visibleWidth(right));
     return truncateAnsi(`${left}${borderColor}${hline(fill)}${right}`, cols);
@@ -3951,6 +3975,7 @@ export class TerminalUi {
   private renderViewportLeft(width: number, height: number): string[] {
     if (this.timeline.length === 0) {
       const hero = renderHeroLines({
+        i18n: this.i18n,
         width,
         height,
         tick: this.tick,
@@ -4025,6 +4050,7 @@ export class TerminalUi {
       !animated &&
       entry.cache &&
       entry.cache.width === width &&
+      entry.cache.language === this.i18n.language &&
       entry.cache.rev === entry.rev
     ) {
       return entry.cache.lines;
@@ -4055,15 +4081,15 @@ export class TerminalUi {
         const elapsed = formatDuration(
           Math.max(0, Date.now() - entry.startedAt),
         );
-        const wordBadge = entry.words > 0 ? ` · ${entry.words} words` : "";
+        const wordBadge = entry.words > 0 ? this.i18n.t("timeline.words", { count: entry.words }) : "";
         out.push(
-          `${t.violet}${t.bold}${star} Thinking…${t.reset} ${t.muted}· ${elapsed}${wordBadge}${t.reset} ${renderBinaryPulse(this.tick, this.status.magic?.bytes ?? null, t, 6)}`,
+          `${t.violet}${t.bold}${star} ${this.i18n.t("timeline.thinking")}${t.reset} ${t.muted}· ${elapsed}${wordBadge}${t.reset} ${renderBinaryPulse(this.tick, this.status.magic?.bytes ?? null, t, 6)}`,
         );
       } else if (clean || entry.words > 0) {
-        const dur = ` for ${formatDuration(Math.max(0, entry.durationMs))}`;
-        const wordBadge = entry.words > 0 ? ` · ${entry.words} words` : "";
+        const dur = this.i18n.t("timeline.elapsed", { time: formatDuration(Math.max(0, entry.durationMs)) });
+        const wordBadge = entry.words > 0 ? this.i18n.t("timeline.words", { count: entry.words }) : "";
         out.push(
-          `${t.violet}✻ Thought${dur}${t.reset}${t.muted}${wordBadge}${t.reset}`,
+          `${t.violet}✻ ${this.i18n.t("timeline.thought")}${dur}${t.reset}${t.muted}${wordBadge}${t.reset}`,
         );
       }
       if (clean) {
@@ -4084,12 +4110,12 @@ export class TerminalUi {
       }
       const headerStatus =
         doneCount < total
-          ? `${t.neonCyan}running ${doneCount + 1}/${total}${t.reset}`
+          ? `${t.neonCyan}${this.i18n.t("timeline.running", { step: doneCount + 1, total })}${t.reset}`
           : failCount > 0
-            ? `${t.crimson}${total - failCount}/${total} ok · ${failCount} failed${t.reset}`
-            : `${t.emerald}${total} completed${t.reset}`;
+            ? `${t.crimson}${this.i18n.t("timeline.failed", { ok: total - failCount, total, failed: failCount })}${t.reset}`
+            : `${t.emerald}${this.i18n.t("timeline.complete", { total })}${t.reset}`;
       out.push(
-        `${t.borderActive}╭─${t.reset} ${t.muted}rea tools ·${t.reset} ${headerStatus}`,
+        `${t.borderActive}╭─${t.reset} ${t.muted}${this.i18n.t("timeline.reaTools")} ·${t.reset} ${headerStatus}`,
       );
 
       entry.calls.forEach((call, cIdx) => {
@@ -4140,6 +4166,7 @@ export class TerminalUi {
         t,
         entry.streaming,
         true,
+        this.i18n.language,
       );
       mdLines.forEach((mLine, mIdx) => {
         const startsWithSectionBadge =
@@ -4166,7 +4193,7 @@ export class TerminalUi {
     }
 
     if (!animated) {
-      entry.cache = { width, rev: entry.rev, lines: out };
+      entry.cache = { width, rev: entry.rev, language: this.i18n.language, lines: out };
     }
     return out;
   }
@@ -4198,7 +4225,7 @@ export class TerminalUi {
 
     // 1. Live Binary / Hex Oscilloscope
     rows.push(
-      `${t.neonMint}${t.bold}◈ BITSTREAM${t.reset} ${t.subtle}(${this.binaryMode})${t.reset}`,
+      `${t.neonMint}${t.bold}◈ ${this.i18n.upper(this.i18n.t("hud.bitstream"))}${t.reset} ${t.subtle}(${this.binaryMode})${t.reset}`,
     );
     const binaryRows = renderHudBinaryStrip(
       width,
@@ -4213,42 +4240,44 @@ export class TerminalUi {
     rows.push(`${t.border}${hline(width)}${t.reset}`);
 
     // 2. Session & Target Telemetry
-    rows.push(`${t.neonCyan}${t.bold}◈ TELEMETRY${t.reset}`);
+    rows.push(`${t.neonCyan}${t.bold}◈ ${this.i18n.upper(this.i18n.t("hud.telemetry"))}${t.reset}`);
     const kv = (k: string, v: string, color = t.fg): string =>
       truncateAnsi(
-        `${t.muted}${k.padEnd(9)}${t.reset}${color}${v}${t.reset}`,
+        `${t.muted}${padEndAnsi(k, 11)}${t.reset}${color}${v}${t.reset}`,
         width,
       );
 
     const targetName = this.status.target
       ? basenameOf(this.status.target)
-      : this.status.analysisScope ? `${basenameOf(this.status.analysisScope.value)} (${this.status.analysisScope.historical ? "history" : "analysis"})` : "none";
+      : this.status.analysisScope ? `${basenameOf(this.status.analysisScope.value)} (${this.status.analysisScope.historical ? this.i18n.t("hud.history") : this.i18n.t("hud.analysis")})` : this.i18n.t("hud.none");
     rows.push(
-      kv("target", targetName, this.status.target ? t.fgBright : t.muted),
+      kv(this.i18n.t("hud.target"), targetName, this.status.target ? t.fgBright : t.muted),
     );
-    if (this.status.nativeBinding) rows.push(kv("binding", `native ${this.status.nativeBinding}`, t.muted));
+    const binding = { open: "hud.open", closed: "hud.closed", unknown: "hud.bindingUnknown" } as const;
+    if (this.status.nativeBinding) rows.push(kv(this.i18n.t("hud.binding"), this.i18n.t("hud.nativeBinding", { state: this.i18n.t(binding[this.status.nativeBinding]) }), t.muted));
     if (this.status.magic) {
       const sz = formatBytes(this.status.magic.sizeBytes);
       rows.push(
         kv(
-          "format",
+          this.i18n.t("hud.format"),
           `${this.status.magic.label}${sz ? ` (${sz})` : ""}`,
           t.neonCyan,
         ),
       );
     }
     if (this.status.provider) {
-      rows.push(kv("provider", this.status.provider, t.emerald));
+      rows.push(kv(this.i18n.t("hud.provider"), this.status.provider, t.emerald));
     }
     const shortModel =
-      this.status.model.split("/").at(-1) || this.status.model || "-";
+      this.status.model === "no-model" ? this.i18n.t("status.noModel")
+        : this.status.model.split("/").at(-1) || this.status.model || "-";
     const hudModelLabel = this.status.modelProvider
       ? `${this.status.modelProvider}:${shortModel}`
       : shortModel;
-    rows.push(kv("model", hudModelLabel, t.violet));
+    rows.push(kv(this.i18n.t("hud.model"), hudModelLabel, t.violet));
     rows.push(
       kv(
-        "thinking",
+        this.i18n.t("hud.thinking"),
         this.status.effort,
         this.status.effort === "auto" ? t.fg : t.neonMint,
       ),
@@ -4262,22 +4291,22 @@ export class TerminalUi {
       : "⚡ -- tok/s";
     rows.push(
       kv(
-        "speed",
+        this.i18n.t("hud.speed"),
         tpsText,
         hasTps ? (this.status.tpsLive ? t.emerald : t.neonMint) : t.muted,
       ),
     );
     if (this.status.compactor) {
-      rows.push(kv("compact", this.status.compactor, t.neonCyan));
+      rows.push(kv(this.i18n.t("hud.compact"), this.status.compactor, t.neonCyan));
     }
     if (this.networkGuard) {
       const g = this.networkGuard;
       const netVal =
         g.state === "restored"
-          ? `✓ online${g.latencyMs !== null ? ` (${g.latencyMs}ms)` : ""}`
-          : `◌ ping #${g.attempt} ${g.target}`;
+          ? this.i18n.t("hud.online", { latency: g.latencyMs !== null ? ` (${g.latencyMs}ms)` : "" })
+          : this.i18n.t("hud.ping", { attempt: g.attempt, time: g.target });
       rows.push(
-        kv("net", netVal, g.state === "restored" ? t.emerald : t.amber),
+        kv(this.i18n.t("hud.network"), netVal, g.state === "restored" ? t.emerald : t.amber),
       );
     }
     {
@@ -4285,40 +4314,42 @@ export class TerminalUi {
       const barWidth = Math.max(4, Math.min(12, width - 9 - 8));
       rows.push(
         truncateAnsi(
-          `${t.muted}${"context".padEnd(9)}${t.reset}${contextBar(ctx.percent, barWidth, t)} ${contextColor(ctx.percent, t)}${ctx.source === "estimate" ? "~" : ""}${ctx.percent}%${t.reset}`,
+          `${t.muted}${padEndAnsi(this.i18n.t("hud.context"), 11)}${t.reset}${contextBar(ctx.percent, barWidth, t)} ${contextColor(ctx.percent, t)}${ctx.source === "estimate" ? "~" : ""}${ctx.percent}%${t.reset}`,
           width,
         ),
       );
       rows.push(
         kv(
           "",
-          `${ctx.source === "estimate" ? "~" : ""}${formatTokenCountShort(ctx.tokens)} / ${formatTokenCountShort(ctx.window)}${ctx.windowSource?.startsWith("conservative") ? " safe" : ""}`,
+          `${ctx.source === "estimate" ? "~" : ""}${formatTokenCountShort(ctx.tokens)} / ${formatTokenCountShort(ctx.window)}${ctx.windowSource?.startsWith("conservative") ? this.i18n.t("hud.safe") : ""}`,
           t.muted,
         ),
       );
     }
     rows.push(
       kv(
-        "ledger",
-        `${this.ledgerCount(this.status.evidence)} ev · ${this.ledgerCount(this.status.unknowns)} unk`,
+        this.i18n.t("hud.ledger"),
+        this.i18n.t("hud.ledgerCounts", { evidence: this.ledgerCount(this.status.evidence), unknowns: this.ledgerCount(this.status.unknowns) }),
         (this.status.evidence ?? 0) > 0 ? t.neonMint : t.fg,
       ),
     );
-    if (this.status.unknownTotal !== undefined) rows.push(kv("unknowns", `${this.ledgerCount(this.status.unknownTotal)} total · ${this.ledgerCount(this.status.unknownResolved ?? null)} resolved`, t.muted));
-    if (this.status.ledgerHealth) rows.push(kv("source", this.status.ledgerHealth === "live" ? "active native ledger" : this.status.ledgerHealth, this.status.ledgerHealth === "live" ? t.muted : t.amber));
+    if (this.status.unknownTotal !== undefined) rows.push(kv(this.i18n.t("hud.unknowns"), this.i18n.t("hud.unknownCounts", { total: this.ledgerCount(this.status.unknownTotal), resolved: this.ledgerCount(this.status.unknownResolved ?? null) }), t.muted));
+    if (this.status.ledgerHealth) rows.push(kv(this.i18n.t("hud.source"),
+      this.status.ledgerHealth === "live" ? this.i18n.t("hud.liveLedger") : ledgerHealthLabel(this.i18n, this.status.ledgerHealth),
+      this.status.ledgerHealth === "live" ? t.muted : t.amber));
     rows.push(
       kv(
-        "journal",
-        `${this.status.journalHealth === "unavailable" ? "?" : `#${this.status.journal}`} events${this.status.journalMalformed ? ` + ${this.status.journalMalformed} invalid` : ""}`,
+        this.i18n.t("hud.journal"),
+        this.i18n.t("hud.events", { count: this.status.journalHealth === "unavailable" ? "?" : `#${this.status.journal}`, invalid: this.status.journalMalformed ? this.i18n.t("hud.invalid", { count: this.status.journalMalformed }) : "" }),
         t.fg,
       ),
     );
-    rows.push(kv("usage", `${formatTokenCount(this.status.tokens)} tok${this.status.estimatedTokens ? ` (${formatTokenCount(this.status.estimatedTokens)} est)` : ""}${this.status.priorUsageUnknown ? " + ? prior" : ""}`, t.muted));
+    rows.push(kv(this.i18n.t("hud.usage"), `${formatTokenCount(this.status.tokens)} tok${this.status.estimatedTokens ? this.i18n.t("hud.estimated", { count: formatTokenCount(this.status.estimatedTokens) }) : ""}${this.status.priorUsageUnknown ? this.i18n.t("hud.prior") : ""}`, t.muted));
 
     if (rows.length + 2 >= height) return rows.slice(0, height);
 
     rows.push(`${t.border}${hline(width)}${t.reset}`);
-    rows.push(`${t.indigo}${t.bold}◈ AGENT CALLS${t.reset}`);
+    rows.push(`${t.indigo}${t.bold}◈ ${this.i18n.upper(this.i18n.t("hud.calls"))}${t.reset}`);
 
     const remaining = Math.max(0, height - rows.length);
     const recentCalls: ToolCallItem[] = [];
@@ -4340,7 +4371,7 @@ export class TerminalUi {
     recentCalls.reverse();
 
     if (recentCalls.length === 0) {
-      rows.push(`${t.muted}no tool executions yet${t.reset}`);
+      rows.push(`${t.muted}${this.i18n.t("hud.noCalls")}${t.reset}`);
     } else {
       for (const call of recentCalls) {
         const icon =
@@ -4375,7 +4406,9 @@ export class TerminalUi {
     ) {
       return this.outputWrapCache.lines;
     }
-    const wrapped = wrapPlain(this.output.text, innerW, true);
+    const wrapped = this.output.label === "/changelog"
+      ? renderMarkdown(this.output.text, innerW, this.theme, false, true, this.i18n.language)
+      : wrapPlain(this.output.text, innerW, true);
     this.outputWrapCache = {
       text: this.output.text,
       width: innerW,
@@ -4404,13 +4437,13 @@ export class TerminalUi {
     const lines: string[] = [];
     const title =
       items[0]?.kind === "mention"
-        ? "@ mention (images & files)"
+        ? this.i18n.t("palette.mentions")
         : items[0]?.kind === "path"
-          ? "files & targets"
+          ? this.i18n.t("palette.files")
           : items[0]?.kind === "arg"
-            ? "options"
-            : "commands";
-    const hint = `↑↓ select · tab/→ complete · esc close (${items.length})`;
+            ? this.i18n.t("palette.options")
+            : this.i18n.t("palette.commands");
+    const hint = this.i18n.t("palette.hint", { count: items.length });
     lines.push(
       this.renderBoxTop(cols, title, hint, t.borderActive, t.neonCyan),
     );
@@ -4439,7 +4472,7 @@ export class TerminalUi {
           : `${t.borderActive}│${t.reset}`;
       if (!item) {
         const empty = padEndAnsi(
-          `${t.muted}(no matching commands)${t.reset}`,
+          `${t.muted}${this.i18n.t("palette.noMatches")}${t.reset}`,
           innerW,
         );
         lines.push(`${t.borderActive}│${t.reset} ${empty} ${rightBorder}`);
@@ -4455,7 +4488,7 @@ export class TerminalUi {
               : `${t.pillCyanBg}${t.neonCyan}`;
       const marker = active ? `${t.neonMint}${t.bold}▸${t.reset}` : " ";
       const usagePart = item.usage ? ` ${t.muted}${item.usage}${t.reset}` : "";
-      const leftCol = `${marker} ${badgeColor} ${item.badge.padEnd(5)} ${t.reset} ${active ? `${t.bold}${t.fgBright}` : t.fg}${item.label}${t.reset}${usagePart}`;
+      const leftCol = `${marker} ${badgeColor} ${padEndAnsi(this.paletteBadge(item.badge), 5)} ${t.reset} ${active ? `${t.bold}${t.fgBright}` : t.fg}${item.label}${t.reset}${usagePart}`;
       const paddedLeft = padEndAnsi(
         leftCol,
         Math.min(38, Math.floor(innerW * 0.48)),
@@ -4497,9 +4530,9 @@ export class TerminalUi {
     const more = wrapped.length - shown.length;
     const hint =
       more > 0
-        ? `+${more} lines · ctrl+o expand · esc close`
-        : `${wrapped.length} lines · esc close`;
-    const isErr = this.output.label.includes("error");
+        ? this.i18n.t("drawer.more", { count: more })
+        : this.i18n.t("drawer.lines", { count: wrapped.length });
+    const isErr = this.output.label.includes("error") || this.output.label === this.i18n.t("common.errorTitle");
     const borderColor = isErr ? t.crimson : t.borderActive;
     const titleColor = isErr ? t.crimson : t.neonMint;
 
@@ -4536,29 +4569,29 @@ export class TerminalUi {
     const titleColor = isRestored ? t.emerald : t.amber;
     const elapsed = formatDuration(Math.max(0, Date.now() - g.startedAt));
     const title = isRestored
-      ? "◈ net guard · ✓ link restored"
+      ? this.i18n.t("net.restored")
       : cols >= 72
-        ? "◈ net guard · session paused (network hold)"
-        : "◈ net guard · network hold";
+        ? this.i18n.t("net.paused")
+        : this.i18n.t("net.hold");
     const hint = isRestored
-      ? `✓ online · resumed after ${elapsed}`
-      : `ping #${g.attempt} · ${elapsed} · esc cancel`;
+      ? this.i18n.t("net.resumed", { time: elapsed })
+      : this.i18n.t("net.ping", { attempt: g.attempt, time: elapsed });
 
     let bodyText: string;
     if (isRestored) {
       const lat =
         g.latencyMs !== null ? ` ${t.neonMint}(${g.latencyMs}ms)${t.reset}` : "";
       bodyText =
-        `${t.emerald}${t.bold}✓ PING OK ──▸ ${g.target}${t.reset}${lat}` +
-        `${t.muted} · ${t.reset}${t.emerald}✓ network online · continuing session${t.reset}`;
+        `${t.emerald}${t.bold}✓ ${this.i18n.t("net.pingOk")} ──▸ ${g.target}${t.reset}${lat}` +
+        `${t.muted} · ${t.reset}${t.emerald}✓ ${this.i18n.t("net.continuing")}${t.reset}`;
     } else {
       const spin = SPINNER_FRAMES[this.tick % SPINNER_FRAMES.length];
       const reasonClipped = g.reason
         ? truncateAnsi(g.reason, Math.max(12, Math.floor(innerW * 0.36)))
-        : "waiting for link…";
+        : this.i18n.t("net.waiting");
       const holdNote =
         cols >= 84
-          ? `${t.muted} · holding session state & processes${t.reset}`
+          ? `${t.muted} · ${this.i18n.t("net.holding")}${t.reset}`
           : "";
       bodyText =
         `${t.amber}${spin}${t.reset} ${t.neonCyan}${t.bold}PING ──▸ ${g.target}${t.reset}` +
@@ -4582,7 +4615,7 @@ export class TerminalUi {
       const lat = g.latencyMs !== null ? ` (${g.latencyMs}ms)` : "";
       const body = padEndAnsi(
         truncateAnsi(
-          `${t.emerald}${t.bold}✓ NET GUARD · PING OK ──▸ ${g.target}${lat} · resuming session${t.reset}`,
+          `${t.emerald}${t.bold}✓ ${this.i18n.upper(this.i18n.t("net.title"))} · ${this.i18n.t("net.pingOk")} ──▸ ${g.target}${lat} · ${this.i18n.t("net.resuming")}${t.reset}`,
           innerW,
         ),
         innerW,
@@ -4592,7 +4625,7 @@ export class TerminalUi {
     const spin = SPINNER_FRAMES[this.tick % SPINNER_FRAMES.length];
     const body = padEndAnsi(
       truncateAnsi(
-        `${t.amber}${spin} NET GUARD · ${t.neonCyan}PING ──▸ ${g.target}${t.amber} #${g.attempt} · ${g.reason || "offline"}${t.reset}`,
+        `${t.amber}${spin} ${this.i18n.upper(this.i18n.t("net.title"))} · ${t.neonCyan}PING ──▸ ${g.target}${t.amber} #${g.attempt} · ${g.reason || this.i18n.t("net.offline")}${t.reset}`,
         innerW,
       ),
       innerW,
@@ -4605,11 +4638,11 @@ export class TerminalUi {
     if (this.queuedSteers.length === 0) return [];
     const innerW = Math.max(8, cols - 4);
     const star = THINKING_STAR_FRAMES[this.tick % THINKING_STAR_FRAMES.length];
-    const title = `${star} steering · ${this.queuedSteers.length} sırada`;
+    const title = this.i18n.t("steer.queue", { icon: star, count: this.queuedSteers.length });
     const hint =
       cols >= 84
-        ? "sonraki tool adımında iletilecek · hemen göndermek için tekrar Enter'a bas · Alt+↑ düzenle"
-        : "sonraki adımda · Enter×2 şimdi gönder · Alt+↑ düzenle";
+        ? this.i18n.t("steer.fullHint")
+        : this.i18n.t("steer.hint");
     const out: string[] = [
       this.renderBoxTop(cols, title, hint, t.amber, t.amber),
     ];
@@ -4634,7 +4667,7 @@ export class TerminalUi {
           `${t.pillCyanBg}${t.neonCyan}${t.bold} 📎 ${img.label} ${t.reset}`,
       )
       .join(" ");
-    const hint = `${t.muted} · Ctrl+V görsel ekle · boş satırda Backspace sil${t.reset}`;
+    const hint = `${t.muted} · ${this.i18n.t("clipboard.strip")}${t.reset}`;
     const body = padEndAnsi(truncateAnsi(`${pills}${hint}`, innerW), innerW);
     return `${t.borderActive}│${t.reset} ${body} ${t.borderActive}│${t.reset}`;
   }
@@ -4647,7 +4680,9 @@ export class TerminalUi {
   private renderStatusBar(width: number): string {
     const t = this.theme;
     const shortModel =
-      this.status.model.split("/").at(-1) || this.status.model || "no-model";
+      this.status.model && this.status.model !== "no-model"
+        ? this.status.model.split("/").at(-1) || this.status.model
+        : this.i18n.t("status.noModel");
     const modelLabel = this.status.modelProvider
       ? `${this.status.modelProvider}:${shortModel}`
       : shortModel;
@@ -4661,16 +4696,16 @@ export class TerminalUi {
       this.status.tps > 0;
     const tpsTag = hasTps
       ? `${t.muted} · ${t.reset}${this.status.tpsLive ? t.emerald : t.neonMint}⚡ ${this.status.tps!.toFixed(1)} tps${t.reset}`
-      : `${t.muted} · ⚡ -- tps${t.reset}`;
+      : "";
     const ctx = this.status.context;
     const ctxTag =
-      `${t.muted} · ctx ${t.reset}${contextColor(ctx.percent, t)}${ctx.source === "estimate" ? "~" : ""}${ctx.percent}%${t.reset}` +
-      (width >= 112
+      `${t.muted} · ${this.i18n.t("status.context")} ${t.reset}${contextColor(ctx.percent, t)}${ctx.source === "estimate" ? "~" : ""}${ctx.percent}%${t.reset}` +
+      (width >= 148
         ? `${t.muted} ${formatTokenCountShort(ctx.tokens)}/${formatTokenCountShort(ctx.window)}${t.reset}`
         : "");
     const target = this.status.target
       ? basenameOf(this.status.target)
-      : this.status.analysisScope ? `${basenameOf(this.status.analysisScope.value)}[${this.status.analysisScope.historical ? "history" : "analysis"}]` : "no-target";
+      : this.status.analysisScope ? `${basenameOf(this.status.analysisScope.value)}[${this.status.analysisScope.historical ? this.i18n.t("hud.history") : this.i18n.t("hud.analysis")}]` : "";
     const scrollTag = this.scroll > 0 ? ` · ↑${this.scroll}` : "";
     const tokTag =
       this.status.tokens > 0
@@ -4681,7 +4716,7 @@ export class TerminalUi {
     if (this.clipboardNotice && Date.now() < this.clipboardNotice.until) {
       rightRendered = `${t.neonMint}${t.bold}${this.clipboardNotice.text}${t.reset}`;
     } else if (this.hasActiveSelection()) {
-      rightRendered = `${t.neonCyan}${t.bold}seçim aktif · Ctrl+Shift+C / Ctrl+C kopyala · Esc temizle${t.reset}`;
+      rightRendered = `${t.neonCyan}${t.bold}${this.i18n.t("status.selection")}${t.reset}`;
     } else if (this.busy) {
       const spin = SPINNER_FRAMES[this.tick % SPINNER_FRAMES.length];
       const elapsed =
@@ -4692,26 +4727,32 @@ export class TerminalUi {
         this.binaryMode !== "off"
           ? `${renderBinaryPulse(this.tick, this.status.magic?.bytes ?? null, t, 6)} `
           : "";
-      rightRendered = `${pulse}${t.neonCyan}${spin} ${this.busy}${elapsed}${t.reset} ${t.muted}(esc cancel)${t.reset}`;
+      rightRendered = `${pulse}${t.neonCyan}${spin} ${this.busy}${elapsed}${t.reset} ${t.muted}(${this.i18n.t("status.cancel")})${t.reset}`;
     } else if (Date.now() < this.ctrlCArmedUntil) {
-      rightRendered = `${t.amber}${t.bold}! ctrl+c again to exit${t.reset}`;
+      rightRendered = `${t.amber}${t.bold}${this.i18n.t("status.exit")}${t.reset}`;
+    } else if (width < 96) {
+      rightRendered = `${t.muted}Alt+M · Ctrl+V · /${t.reset}`;
+    } else if (width < 148) {
+      rightRendered = `${t.muted}${this.i18n.t("status.models")} · ${this.i18n.t("status.commands")}${this.output.text ? this.i18n.t("status.output") : ""}${t.reset}`;
     } else {
-      const thinkHint = width >= 108 ? " · alt+e think" : "";
-      const clipHint =
-        width >= 96
-          ? " · ctrl+v paste · ctrl+shift+c copy"
-          : " · ctrl+v";
-      rightRendered = `${t.muted}alt+m models${thinkHint}${clipHint} · ctrl+k cmds${this.output.text ? " · ctrl+o out" : ""}${t.reset}`;
+      const thinkHint = width >= 108 ? this.i18n.t("status.think") : "";
+      const clipHint = this.i18n.t("status.paste");
+      rightRendered = `${t.muted}${this.i18n.t("status.models")}${thinkHint}${clipHint} · ${this.i18n.t("status.commands")}${this.output.text ? this.i18n.t("status.output") : ""}${t.reset}`;
     }
 
     const rightW = visibleWidth(rightRendered);
     const leftBudget = Math.max(8, width - rightW - 2);
-    const leftText =
-      ` ${t.violet}◆ ${modelLabel}${t.reset}${effortTag}${tpsTag}${ctxTag}` +
-      `${t.muted} · ${t.reset}${t.fg}${target}${t.reset}` +
-      `${t.muted} · ev:${t.reset}${t.neonMint}${this.ledgerCount(this.status.evidence)}${t.reset}` +
-      `${t.muted} · unk:${t.reset}${(this.status.unknowns ?? 0) > 0 ? t.amber : t.muted}${this.ledgerCount(this.status.unknowns)}${t.reset}` +
-      `${t.muted} · j:${this.status.journal}${tokTag}${scrollTag}${t.reset}`;
+    const metrics = effortTag + tpsTag + ctxTag +
+      `${t.muted} · ${this.i18n.t("status.evidence")}:${t.reset}${t.neonMint}${this.ledgerCount(this.status.evidence)}${t.reset}` +
+      `${t.muted} · ${this.i18n.t("status.unknowns")}:${t.reset}${(this.status.unknowns ?? 0) > 0 ? t.amber : t.muted}${this.ledgerCount(this.status.unknowns)}${t.reset}` +
+      `${t.muted} · ${this.i18n.t("status.journal")}:${this.status.journal}${tokTag}${scrollTag}${t.reset}`;
+
+    const identityBudget = Math.max(0, leftBudget - visibleWidth(metrics) - 3);
+    const modelBudget = target ? Math.ceil(identityBudget * 0.6) : identityBudget;
+    const shownModel = truncateAnsi(modelLabel, modelBudget);
+    const shownTarget = truncateAnsi(target, Math.max(0, identityBudget - visibleWidth(shownModel) - 3));
+    const targetTag = shownTarget ? `${t.muted} · ${t.reset}${t.fg}${shownTarget}${t.reset}` : "";
+    const leftText = ` ${t.violet}◆ ${shownModel}${t.reset}${targetTag}${metrics}`;
 
     const leftPadded = padEndAnsi(leftText, leftBudget);
     return truncateAnsi(`${leftPadded}  ${rightRendered}`, width);
@@ -4762,19 +4803,19 @@ export class TerminalUi {
 
     // 1. Top title border
     const spinBadge = this.picker.loading
-      ? ` · ${SPINNER_FRAMES[this.tick % SPINNER_FRAMES.length]} live`
+      ? this.i18n.t("picker.live", { count: SPINNER_FRAMES[this.tick % SPINNER_FRAMES.length] })
       : "";
     const isCompactionPicker = this.picker.purpose === "compaction";
     const modalTitle = isEffortStage
       ? this.picker.effortOnly
-        ? "◈ thinking / reasoning effort"
-        : "◈ model & provider matrix · step 2: thinking"
+        ? this.i18n.t("picker.effort")
+        : this.i18n.t("picker.effortStep")
       : isCompactionPicker
-        ? `◈ compaction model selector${spinBadge}`
-        : `◈ model & provider matrix${spinBadge}`;
+        ? this.i18n.t("picker.compactionTitle", { live: spinBadge })
+        : this.i18n.t("picker.modelsTitle", { live: spinBadge });
     const topHint =
       cols >= 74
-        ? `${connectedCount} connected · ${localCount} local · ${this.picker.providers.length} providers · esc ${isEffortStage && !this.picker.effortOnly ? "back" : "close"}`
+        ? this.i18n.t("picker.connectionCounts", { connected: connectedCount, local: localCount, total: this.picker.providers.length, action: this.i18n.t(isEffortStage && !this.picker.effortOnly ? "picker.backAction" : "picker.close") })
         : `${connectedCount}/${this.picker.providers.length} · esc`;
     lines.push(
       this.renderBoxTop(cols, modalTitle, topHint, t.borderActive, t.neonMint),
@@ -4784,12 +4825,12 @@ export class TerminalUi {
     const activeShort =
       this.picker.activeModelId.split("/").at(-1) ||
       this.picker.activeModelId ||
-      "none";
+      this.i18n.t("hud.none");
     const primarySummary = this.picker.activeProviderId
       ? `${this.picker.activeProviderId}:${activeShort}`
       : activeShort;
     const activeSummary = isCompactionPicker
-      ? `compact→${this.picker.compactionModelSpec || `active(${primarySummary})`}`
+      ? this.i18n.t("picker.compactLabel", { model: this.picker.compactionModelSpec || this.i18n.t("picker.activeLabel", { model: primarySummary }) })
       : primarySummary;
     const rightActive =
       innerW >= 44
@@ -4809,7 +4850,7 @@ export class TerminalUi {
       shownQuery.length > 0
         ? `${t.neonCyan}${t.bold}⌕ ${t.reset}${t.fgBright}${shownQuery}${t.reset}`
         : `${t.neonCyan}${t.bold}⌕ ${t.reset}${t.muted}${truncateAnsi(
-            "Filter models or providers, or type any custom model ID…",
+            this.i18n.t("picker.filter"),
             searchTextBudget,
           )}${t.reset}`;
     const searchLeftPadded = padEndAnsi(
@@ -4841,11 +4882,11 @@ export class TerminalUi {
 
       if (hasHeader) {
         const leftHdr = padEndAnsi(
-          `${t.neonCyan}${t.bold}PROVIDERS${t.reset} ${t.muted}(Tab/←→)${t.reset}`,
+          `${t.neonCyan}${t.bold}${this.i18n.upper(this.i18n.t("picker.providers"))}${t.reset} ${t.muted}(Tab/←→)${t.reset}`,
           leftPaneW,
         );
         const rightHdr = padEndAnsi(
-          `${t.neonMint}${t.bold}MODELS${t.reset} ${t.muted}(${rowsList.length} shown)${t.reset}`,
+          `${t.neonMint}${t.bold}${this.i18n.upper(this.i18n.t("picker.models"))}${t.reset} ${t.muted}(${this.i18n.t("picker.shown", { count: rowsList.length })})${t.reset}`,
           rightPaneW,
         );
         lines.push(
@@ -4910,8 +4951,8 @@ export class TerminalUi {
             activeTab?.provider &&
             !activeTab.provider.connected &&
             !activeTab.provider.local
-              ? `Export ${activeTab.provider.envHint} to connect ${activeTab.provider.name}`
-              : "No matching models — type any custom model ID above";
+              ? this.i18n.t("picker.connect", { key: activeTab.provider.envHint, provider: activeTab.provider.name })
+              : this.i18n.t("picker.noResults");
           rightCell = padEndAnsi(
             `${t.muted}${truncateAnsi(emptyHint, rightPaneW)}${t.reset}`,
             rightPaneW,
@@ -4948,7 +4989,7 @@ export class TerminalUi {
               : t.fg;
           const customSuffix =
             mRow.source === "custom-input"
-              ? ` ${t.muted}(custom model ID)${t.reset}`
+              ? ` ${t.muted}${this.i18n.t("picker.customId")}${t.reset}`
               : mRow.note
                 ? ` ${t.muted}· ${mRow.note}${t.reset}`
                 : "";
@@ -4974,7 +5015,7 @@ export class TerminalUi {
     } else {
       lines.push(`${t.borderActive}├${hline(cols - 2)}┤${t.reset}`);
       const tabBanner = activeTab
-        ? `${t.neonCyan}◀${t.reset} ${t.bold}${t.fgBright}${activeTab.label}${t.reset} ${t.muted}(${rowsList.length}) · Tab/←→ provider ▶${t.reset}`
+        ? `${t.neonCyan}◀${t.reset} ${t.bold}${t.fgBright}${activeTab.label}${t.reset} ${t.muted}(${rowsList.length}) · ${this.i18n.t("picker.providerNav")} ▶${t.reset}`
         : "";
       lines.push(
         `${t.borderActive}│${t.reset} ${padEndAnsi(tabBanner, innerW)} ${t.borderActive}│${t.reset}`,
@@ -4995,7 +5036,7 @@ export class TerminalUi {
         let cell = "";
         if (!mRow) {
           cell = padEndAnsi(
-            i === 0 ? `${t.muted}(no matching models)${t.reset}` : "",
+            i === 0 ? `${t.muted}${this.i18n.t("picker.noMatching")}${t.reset}` : "",
             innerW,
           );
         } else {
@@ -5039,11 +5080,11 @@ export class TerminalUi {
           ? `${targetProv}:${shortTargetModel}`
           : shortTargetModel;
         const saveBadge = this.picker.pendingSaveDefault
-          ? ` ${t.pillAmberBg}${t.amber} SAVE DEFAULT ${t.reset}`
+          ? ` ${t.pillAmberBg}${t.amber} ${this.i18n.upper(this.i18n.t("picker.saveDefault"))} ${t.reset}`
           : "";
         const backHint = this.picker.effortOnly
-          ? "esc cancel"
-          : "esc back to models";
+          ? this.i18n.t("picker.cancel")
+          : this.i18n.t("picker.back");
 
         const pillStrings = REASONING_EFFORT_LEVELS.map((lvl, idx) => {
           const isSel = idx === selEffIdx;
@@ -5074,7 +5115,7 @@ export class TerminalUi {
           );
         } else {
           const info1 =
-            `${t.neonMint}${t.bold}◈ THINKING EFFORT${t.reset} ${t.muted}for${t.reset} ` +
+            `${t.neonMint}${t.bold}◈ ${this.i18n.upper(this.i18n.t("picker.thinkingTitle"))}${t.reset} ${t.muted}${this.i18n.t("picker.for")}${t.reset} ` +
             `${t.violet}${t.bold}◆ ${targetSpec}${t.reset}${saveBadge}` +
             `${t.muted} · ←/→ or 1-7 · ${backHint}${t.reset}`;
           lines.push(
@@ -5088,11 +5129,11 @@ export class TerminalUi {
             const chosenLvl =
               REASONING_EFFORT_LEVELS[selEffIdx] ?? REASONING_EFFORT_LEVELS[0]!;
             const budgetNote = chosenLvl.anthropicBudget
-              ? ` · budget ${chosenLvl.anthropicBudget.toLocaleString("en-US")} tok / reasoning_effort="${chosenLvl.id}"`
+              ? this.i18n.t("picker.thinkingBudget", { budget: chosenLvl.anthropicBudget.toLocaleString(this.i18n.language), effort: chosenLvl.id })
               : chosenLvl.id === "off"
-                ? " · disables extended thinking where supported"
-                : " · uses model/provider default thinking";
-            const info3 = `${t.neonCyan}▸ ${chosenLvl.label}${t.reset}${t.muted} — ${chosenLvl.description}${budgetNote}${t.reset}`;
+                ? this.i18n.t("picker.disablesThinking")
+                : this.i18n.t("picker.defaultThinking");
+            const info3 = `${t.neonCyan}▸ ${chosenLvl.label}${t.reset}${t.muted} — ${this.i18n.t(`effort.${chosenLvl.id}`)}${budgetNote}${t.reset}`;
             lines.push(
               `${t.borderActive}│${t.reset} ${padEndAnsi(info3, innerW)} ${t.borderActive}│${t.reset}`,
             );
@@ -5107,17 +5148,17 @@ export class TerminalUi {
 
         if (focusProvider) {
           const statePill = focusProvider.connected
-            ? `${t.emerald}● connected${t.reset}`
+            ? `${t.emerald}${this.i18n.t("picker.connected")}${t.reset}`
             : focusProvider.local
-              ? `${t.neonCyan}◌ local${t.reset}`
-              : `${t.amber}○ needs key${t.reset}`;
+              ? `${t.neonCyan}${this.i18n.t("picker.local")}${t.reset}`
+              : `${t.amber}${this.i18n.t("picker.keyMissing")}${t.reset}`;
           const authInfo =
             focusProvider.connected || focusProvider.local
               ? focusProvider.keySource
-              : `export ${focusProvider.envHint}`;
+              : this.i18n.t("picker.export", { key: focusProvider.envHint });
           const info1 =
             `${statePill} ${t.fgBright}${t.bold}${focusProvider.name}${t.reset}` +
-            `${t.muted} · ${focusProvider.protocol} · ${focusProvider.baseUrl || "(url env required)"} · ${authInfo}${t.reset}`;
+            `${t.muted} · ${focusProvider.protocol} · ${focusProvider.baseUrl || this.i18n.t("picker.urlRequired")} · ${authInfo}${t.reset}`;
           lines.push(
             `${t.borderActive}│${t.reset} ${padEndAnsi(info1, innerW)} ${t.borderActive}│${t.reset}`,
           );
@@ -5136,11 +5177,11 @@ export class TerminalUi {
             !focusProvider.connected &&
             !focusProvider.local
           ) {
-            info2 = `${t.muted}Setup: ${t.reset}${t.neonCyan}export ${focusProvider.envHint}="…"${t.reset}${t.muted} or configure "${focusProvider.id}" in ~/.config/rea/omr-model.json${t.reset}`;
+            info2 = `${t.muted}${this.i18n.t("picker.configure", { key: `export ${focusProvider.envHint}="…"`, provider: focusProvider.id })}${t.reset}`;
           } else if (focusProvider?.error) {
-            info2 = `${t.amber}△ /models note: ${focusProvider.error}${t.reset}${t.muted} (curated & custom model IDs still work)${t.reset}`;
+            info2 = `${t.amber}${this.i18n.t("picker.modelNote", { message: focusProvider.error })}${t.reset}`;
           } else {
-            info2 = `${t.muted}Enter: select model & choose thinking effort · Alt+S / Ctrl+S: select & save default · Alt+R: refresh /models${t.reset}`;
+            info2 = `${t.muted}${this.i18n.t("picker.modelKeys")}${t.reset}`;
           }
           lines.push(
             `${t.borderActive}│${t.reset} ${padEndAnsi(info2, innerW)} ${t.borderActive}│${t.reset}`,
@@ -5152,8 +5193,8 @@ export class TerminalUi {
     // 5. Bottom border & keybar
     lines.push(`${t.borderActive}╰${hline(cols - 2)}╯${t.reset}`);
     const foot = isEffortStage
-      ? `${t.muted} ←/→/Tab/1-7 thinking · Enter confirm · Alt+S/Ctrl+S confirm & save default · Esc ${this.picker.effortOnly ? "close" : "back to models"}${t.reset}`
-      : `${t.muted} ↑↓ select · Tab/←→ provider · Enter next (thinking) · Alt+S/Ctrl+S save default · Alt+R refresh · Esc close${t.reset}`;
+      ? `${t.muted} ${this.i18n.t("picker.effortKeys", { action: this.i18n.t(this.picker.effortOnly ? "picker.close" : "picker.backAction") })}${t.reset}`
+      : `${t.muted} ${this.i18n.t("picker.nav")}${t.reset}`;
     lines.push(truncateAnsi(foot, Math.max(10, cols - 1)));
 
     while (lines.length < rows) lines.push("");
@@ -5179,28 +5220,28 @@ export class TerminalUi {
     const rangeEnd = Math.min(wrapped.length, this.outputScroll + bodyRows);
     const rangeLabel =
       wrapped.length === 0
-        ? "empty"
-        : `${this.outputScroll + 1}–${rangeEnd} of ${wrapped.length}`;
+        ? this.i18n.t("drawer.empty")
+        : this.i18n.t("drawer.range", { start: this.outputScroll + 1, end: rangeEnd, total: wrapped.length });
 
     const lines: string[] = [];
     lines.push(
       this.renderBoxTop(
         cols,
-        `◈ inspector · ${this.output.label}`,
-        `${rangeLabel} · j/k/pgup/pgdn · g/G · esc close`,
+        this.i18n.t("drawer.title", { label: this.output.label }),
+        this.i18n.t("drawer.keys", { range: rangeLabel }),
         t.borderActive,
         t.neonMint,
       ),
     );
     for (let i = 0; i < bodyRows; i += 1) {
       const rawLine = visible[i] ?? "";
-      const styled = styleInlineMarkdown(rawLine, t);
+      const styled = this.output.label === "/changelog" ? rawLine : styleInlineMarkdown(rawLine, t);
       lines.push(
         `${t.borderActive}│${t.reset} ${padEndAnsi(styled, innerW)} ${t.borderActive}│${t.reset}`,
       );
     }
     lines.push(`${t.borderActive}╰${hline(cols - 2)}╯${t.reset}`);
-    const foot = `${t.muted} ↑/↓/j/k scroll · Space/PgDn page · Home/End top/bottom · Esc/q return to omr${t.reset}`;
+    const foot = `${t.muted} ${this.i18n.t("drawer.footer")}${t.reset}`;
     lines.push(truncateAnsi(foot, Math.max(10, cols - 1)));
 
     while (lines.length < rows) lines.push("");
@@ -5327,8 +5368,8 @@ export class TerminalUi {
     lines.push(
       this.renderBoxTop(
         cols,
-        `◈ resume session · ${filtered.length}/${this.sessionPicker.sessions.length} saved`,
-        "↑↓ seç · Enter yükle & sohbeti getir · Esc kapat",
+        this.i18n.t("sessionPicker.title", { shown: filtered.length, total: this.sessionPicker.sessions.length }),
+        this.i18n.t("sessionPicker.shortcuts"),
         t.borderActive,
         t.neonCyan,
       ),
@@ -5339,7 +5380,7 @@ export class TerminalUi {
     const shownQuery = this.sessionPicker.query;
     const qBody = shownQuery
       ? `${qPrefix}${t.fgBright}${shownQuery}${t.reset}`
-      : `${qPrefix}${t.subtle}Konuşma içeriği, hedef dosya, model veya session ID ile filtrele…${t.reset}`;
+      : `${qPrefix}${t.subtle}${this.i18n.t("sessionPicker.filter")}${t.reset}`;
     lines.push(
       `${t.borderActive}│${t.reset} ${padEndAnsi(truncateAnsi(qBody, innerW), innerW)} ${t.borderActive}│${t.reset}`,
     );
@@ -5364,7 +5405,7 @@ export class TerminalUi {
       const item = filtered[windowStart + i];
       if (!item) {
         if (i === 0 && filtered.length === 0) {
-          const emptyMsg = `${t.muted}  Eşleşen kayıtlı oturum bulunamadı.${t.reset}`;
+          const emptyMsg = `${t.muted}  ${this.i18n.t("sessionPicker.noResults")}${t.reset}`;
           lines.push(
             `${t.borderActive}│${t.reset} ${padEndAnsi(emptyMsg, innerW)} ${t.borderActive}│${t.reset}`,
           );
@@ -5389,17 +5430,17 @@ export class TerminalUi {
       const titleText = item.title || item.shortId || item.id;
       const turnsTag =
         item.userTurnCount !== undefined && item.userTurnCount > 0
-          ? `${item.userTurnCount} turn · `
+          ? this.i18n.t("sessionPicker.turns", { count: item.userTurnCount })
           : "";
       const toolsTag =
         item.toolCallCount !== undefined && item.toolCallCount > 0
-          ? ` · ${item.toolCallCount} tool`
+          ? this.i18n.t("sessionPicker.tools", { count: item.toolCallCount })
           : "";
       const stamp = String(item.updatedAt ?? "")
         .replace("T", " ")
         .replace(/\.\d+Z$/, "")
         .slice(0, 16);
-      const rightMeta = `${turnsTag}${item.messageCount} msg${toolsTag} · ${stamp}`;
+      const rightMeta = `${turnsTag}${this.i18n.t("sessionPicker.messages", { count: item.messageCount })}${toolsTag} · ${stamp}`;
       const rightW = visibleWidth(rightMeta);
       const leftMax = Math.max(12, innerW - rightW - 4);
       const leftTitle = truncateAnsi(
@@ -5423,19 +5464,19 @@ export class TerminalUi {
       if (selected) {
         const tgt = selected.target
           ? basenameOf(selected.target)
-          : "no-target";
-        const mdl = selected.model ?? "default";
+          : this.i18n.t("status.noTarget");
+        const mdl = selected.model ?? this.i18n.t("sessionPicker.default");
         const statusBadge = selected.inFlight
-          ? `${t.amber}⚡ yarıda kalan tur (otomatik devam eder)${t.reset}`
-          : `${t.emerald}✓ tamamlanmış oturum${t.reset}`;
+          ? `${t.amber}${this.i18n.t("sessionPicker.inFlight")}${t.reset}`
+          : `${t.emerald}${this.i18n.t("sessionPicker.completed")}${t.reset}`;
         const selNum = selected.index ?? selIdx + 1;
         const selShort = selected.shortId ?? selected.id;
-        const p1 = `${t.neonMint}${t.bold}Oturum:${t.reset} ${t.neonCyan}${t.bold}#${selNum}${t.reset} ${t.fgBright}[${selShort}]${t.reset} ${t.muted}·${t.reset} ${statusBadge} ${t.muted}(/resume ${selNum} veya Enter)${t.reset}`;
-        const p2 = `${t.neonCyan}Model:${t.reset} ${t.fg}${mdl}${t.reset} ${t.muted}·${t.reset} ${t.neonCyan}Hedef:${t.reset} ${t.fg}${tgt}${t.reset} ${t.muted}· ${selected.messageCount} mesaj${selected.toolCallCount ? ` · ${selected.toolCallCount} tool` : ""}${t.reset}`;
-        const p3 = `${t.violet}Yapılan İş:${t.reset} ${t.fgBright}${t.bold}${selected.title || selected.firstUserPrompt || selShort}${t.reset}`;
+        const p1 = `${t.neonMint}${t.bold}${this.i18n.t("sessionPicker.session")}${t.reset} ${t.neonCyan}${t.bold}#${selNum}${t.reset} ${t.fgBright}[${selShort}]${t.reset} ${t.muted}·${t.reset} ${statusBadge} ${t.muted}${this.i18n.t("sessionPicker.select", { number: selNum })}${t.reset}`;
+        const p2 = `${t.neonCyan}${this.i18n.t("sessionPicker.model")}${t.reset} ${t.fg}${mdl}${t.reset} ${t.muted}·${t.reset} ${t.neonCyan}${this.i18n.t("sessionPicker.target")}${t.reset} ${t.fg}${tgt}${t.reset} ${t.muted}· ${this.i18n.t("sessionPicker.messages", { count: selected.messageCount })}${selected.toolCallCount ? this.i18n.t("sessionPicker.tools", { count: selected.toolCallCount }) : ""}${t.reset}`;
+        const p3 = `${t.violet}${this.i18n.t("sessionPicker.work")}${t.reset} ${t.fgBright}${t.bold}${selected.title || selected.firstUserPrompt || selShort}${t.reset}`;
         const p4 = selected.lastMessagePreview
-          ? `${t.indigo}Son Çıktı:${t.reset} ${t.subtle}${selected.lastMessagePreview}${t.reset}`
-          : `${t.muted}Enter ile tüm konuşma geçmişini ekrana yükle${t.reset}`;
+          ? `${t.indigo}${this.i18n.t("sessionPicker.last")}${t.reset} ${t.subtle}${selected.lastMessagePreview}${t.reset}`
+          : `${t.muted}${this.i18n.t("sessionPicker.load")}${t.reset}`;
         for (const pLine of [p1, p2, p3, p4]) {
           lines.push(
             `${t.borderActive}│${t.reset} ${padEndAnsi(truncateAnsi(pLine, innerW), innerW)} ${t.borderActive}│${t.reset}`,
@@ -5451,7 +5492,7 @@ export class TerminalUi {
     }
 
     lines.push(`${t.borderActive}╰${hline(cols - 2)}╯${t.reset}`);
-    const foot = `${t.muted} ↑/↓/Tekerlek seç · Enter oturumu ve tüm mesajları yükle · Yazarak ara · Esc kapat${t.reset}`;
+    const foot = `${t.muted} ${this.i18n.t("sessionPicker.footer")}${t.reset}`;
     lines.push(truncateAnsi(foot, Math.max(10, cols - 1)));
 
     while (lines.length < rows) lines.push("");

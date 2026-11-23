@@ -1,5 +1,6 @@
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { padEndAnsi } from "../../ansi.js";
 import { inspectTargetMagic } from "../../binaryArt.js";
 import {
   COMPACTION_MODES,
@@ -19,6 +20,7 @@ import { estimateSessionCostUsd } from "../../modelConfig.js";
 import { parseSessionSnapshot } from "../../broker.js";
 import {
   compactJson,
+  ledgerHealthLabel,
   normalized,
   renderEvidence,
   renderJournalTail,
@@ -61,7 +63,7 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
       if (token.startsWith("offset=")) offset = Number(token.slice(7));
       else if (token.startsWith("limit=")) limit = Number(token.slice(6));
       else if (itemId === undefined) itemId = token;
-      else throw new Error("usage: /coverage [item-id] [offset=N] [limit=N]");
+      else throw new Error(ctx.output.i18n.t("common.usage", { command: "/coverage [item-id] [offset=N] [limit=N]" }));
     }
     const result = await ctx.runtime.coverage.report({ ...(itemId ? { itemId } : {}), ...(offset === undefined ? {} : { offset }), ...(limit === undefined ? {} : { limit }) });
     ctx.output.commandResult("coverage", result, JSON.stringify(result, null, 2));
@@ -75,8 +77,8 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
     const inspect = /^inspect\s+(\S+)$/.exec(rest);
     if (inspect) { const result = await ctx.runtime.recipes.inspect(inspect[1]!); ctx.output.commandResult("recipe", result, JSON.stringify(result, null, 2)); return; }
     const run = /^run\s+(\S+)\s+([\s\S]+)$/.exec(rest);
-    if (!run) { ctx.output.fail("usage: /recipe [list|run <recipe> <input-json>|inspect <run-id>]"); return; }
-    if (ctx.activeAbort) { ctx.output.fail("Finish or cancel the active turn before starting a recipe"); return; }
+    if (!run) { ctx.output.fail(ctx.output.i18n.t("common.usage", { command: "/recipe [list|run <recipe> <input-json>|inspect <run-id>]" })); return; }
+    if (ctx.activeAbort) { ctx.output.fail(ctx.output.i18n.t("sessionResult.recipeBusy")); return; }
     await ctx.ensureConnected(); const abort = new AbortController(); ctx.activeAbort = abort;
     try {
       const result = await ctx.runtime.recipes.run(run[1]!, JSON.parse(run[2]!), abort.signal);
@@ -93,7 +95,7 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
       state = await ctx.runtime.task.read();
     } else {
       const update = /^update\s+(\d+)\s+([\s\S]+)$/.exec(rest);
-      if (!update) { ctx.output.fail("usage: /state [get|update <revision> <patch-json>]"); return; }
+      if (!update) { ctx.output.fail(ctx.output.i18n.t("common.usage", { command: "/state [get|update <revision> <patch-json>]" })); return; }
       state = await ctx.runtime.task.update(JSON.parse(update[2]!), Number(update[1]));
     }
     ctx.output.commandResult("state", state, JSON.stringify(state, null, 2));
@@ -102,7 +104,7 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
   registry.register("open", async (ctx, rest) => {
     const resolved = resolveTargetPath(rest, ctx.cwd);
     if (!resolved) {
-      ctx.output.fail("usage: /open <path>");
+      ctx.output.fail(ctx.output.i18n.t("common.usage", { command: "/open <path>" }));
       return;
     }
     const magic = await inspectTargetMagic(resolved);
@@ -117,7 +119,7 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
       ctx.output.commandResult(
         "open",
         { path: resolved, kind: "directory" },
-        `bound directory target\n  path  ${resolved}`,
+        ctx.output.i18n.t("sessionResult.boundDirectory", { path: resolved }),
       );
       return;
     }
@@ -137,7 +139,7 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
     await ctx.syncMagic(ctx.currentTarget);
     await ctx.persistMeta(ctx.currentTarget);
     await ctx.syncBoundSessionSummary();
-    ctx.output.commandResult("open", result.payload, renderOpen(result.payload));
+    ctx.output.commandResult("open", result.payload, renderOpen(result.payload, ctx.output.i18n));
   });
 
   registry.register("close", async (ctx) => {
@@ -153,10 +155,11 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
     ctx.boundProvider = null;
     await ctx.persistMeta(null);
     await ctx.syncLocalStatus();
-    ctx.output.commandResult("close", result.payload, "target closed");
+    ctx.output.commandResult("close", result.payload, ctx.output.i18n.t("sessionResult.closed"));
   });
 
   registry.register("status", async (ctx) => {
+    const { t } = ctx.output.i18n;
     const [snapshot, investigation] = await Promise.all([
       ctx.reaCall("binary_session", { detail: "summary" }),
       ctx.ensureConnected().then(()=>ctx.runtime.investigation.refresh({force:true})),
@@ -167,24 +170,29 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
 
     const ledger = investigation.ledger;
 
+    const row = (label: string, value: string): string => padEndAnsi(label, 10) + value;
     const lines = [
-      `session   ${ctx.session.id}`,
-      renderSession(snapshot.payload),
+      row(t("status.session"), ctx.session.id),
+      renderSession(snapshot.payload, ctx.output.i18n),
     ];
-    if (ctx.currentMagic) lines.push(`magic     ${ctx.currentMagic.label}`);
+    if (ctx.currentMagic) lines.push(row(t("hud.format"), ctx.currentMagic.label));
     if (ctx.activeProfile)
       lines.push(
-        `profile   ${ctx.activeProfile.id} (${ctx.activeProfile.summary})`,
+        row(t("status.profile"), `${ctx.activeProfile.id} (${ctx.activeProfile.summary})`),
       );
     lines.push(
-      `evidence  ${ledger.evidence ?? "?"} retained · unknowns ${ledger.unknownOpen ?? "?"} non-resolved / ${ledger.unknownTotal ?? "?"} total (${ledger.unknownResolved ?? "?"} resolved) · source ${ledger.health}`,
-      `journal   ${journalState.counts.records} events (includes metadata reads and session lifecycle)`,
+      row(t("hud.evidence"), t("status.counts", {
+        evidence: ledger.evidence ?? "?", open: ledger.unknownOpen ?? "?", total: ledger.unknownTotal ?? "?",
+        resolved: ledger.unknownResolved ?? "?", source: ledgerHealthLabel(ctx.output.i18n, ledger.health),
+      })),
+      row(t("hud.journal"), t("status.events", { count: journalState.counts.records })),
     );
     lines.push(
-      `model     ${ctx.modelId}${ctx.agent && ctx.agent.totalTokens > 0 ? ` · ${ctx.agent.totalTokens} tokens` : ""}`,
+      row(t("hud.model"), (ctx.opts.noModel ? t("status.noModel") : ctx.modelId) +
+        (ctx.agent && ctx.agent.totalTokens > 0 ? t("status.modelTokens", { count: ctx.agent.totalTokens }) : "")),
     );
     if (ctx.sources.length > 0)
-      lines.push(`env       ${ctx.sources.join(", ")}`);
+      lines.push(row(t("status.environment"), ctx.sources.join(", ")));
     await ctx.syncLocalStatus();
     ctx.output.commandResult(
       "status",
@@ -214,13 +222,13 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
       ctx.output.commandResult(
         "evidence",
         summary.payload,
-        renderEvidence(summary.payload),
+        renderEvidence(summary.payload, ctx.output.i18n),
       );
       return;
     }
     const resolved = await ctx.resolveEvidenceLookupId(rest);
     if (!resolved.id) {
-      ctx.output.fail(resolved.error ?? `invalid evidence_id: ${rest}`);
+      ctx.output.fail(resolved.error ?? ctx.output.i18n.t("sessionResult.badEvidence", { id: rest }));
       return;
     }
     const result = await ctx.reaCall("get_evidence_bundle", {
@@ -248,7 +256,7 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
     ctx.output.commandResult(
       "unknowns",
       result.payload,
-      renderUnknowns(result.payload),
+      renderUnknowns(result.payload, ctx.output.i18n),
     );
   });
 
@@ -267,7 +275,7 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
     ctx.output.commandResult(
       "export",
       result.payload,
-      `${compactJson(normalized(result.payload), 2_000)}\nwrote ${path}`,
+      ctx.output.i18n.t("sessionResult.wrote", { data: compactJson(normalized(result.payload), 2_000), path }),
     );
   });
 
@@ -366,7 +374,7 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
           unknown_count: citedUnk.size,
           scripts_count: scriptsList.length,
         },
-        `exported JSON forensic dossier (${citedEv.size} Evidence IDs, ${citedUnk.size} Unknowns, ${scriptsList.length} scripts) → ${outPath}`,
+        ctx.output.i18n.t("sessionResult.jsonExport", { evidence: citedEv.size, unknowns: citedUnk.size, scripts: scriptsList.length, path: outPath }),
       );
       return;
     }
@@ -396,7 +404,7 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
           unknown_count: citedUnk.size,
           scripts_count: scriptsList.length,
         },
-        `exported Markdown forensic dossier (${citedEv.size} Evidence IDs, ${citedUnk.size} Unknowns, ${scriptsList.length} scripts) → ${outPath}`,
+        ctx.output.i18n.t("sessionResult.markdownExport", { evidence: citedEv.size, unknowns: citedUnk.size, scripts: scriptsList.length, path: outPath }),
       );
       return;
     }
@@ -420,7 +428,7 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
     ctx.output.commandResult(
       "journal",
       { journal_path: ctx.session.journalPath, lines },
-      renderJournalTail(journal, 30),
+      renderJournalTail(journal, ctx.output.i18n),
     );
   });
 
@@ -432,7 +440,7 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
     ) {
       const cmdName = tokens[1]?.trim() ?? "";
       if (!cmdName) {
-        ctx.output.fail("usage: /save --as-command <name> [template_or_description]");
+        ctx.output.fail(ctx.output.i18n.t("common.usage", { command: "/save --as-command <name> [template_or_description]" }));
         return;
       }
       const extraText = tokens.slice(2).join(" ").trim();
@@ -491,12 +499,12 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
         ctx.output.commandResult(
           "save",
           { path: ctx.lastSavedScriptPath },
-          `latest generated script is already saved at:\n  ${ctx.lastSavedScriptPath}`,
+          ctx.output.i18n.t("sessionResult.alreadySaved", { path: ctx.lastSavedScriptPath }),
         );
         return;
       }
       ctx.output.fail(
-        "no fenced code block found in the latest assistant response to save",
+        ctx.output.i18n.t("sessionResult.noFencedCode"),
       );
       return;
     }
@@ -510,21 +518,21 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
       },
     );
     if (!saved) {
-      ctx.output.fail("failed to save script block");
+      ctx.output.fail(ctx.output.i18n.t("sessionResult.saveFailed"));
       return;
     }
     ctx.lastSavedScriptPath = saved.path;
     ctx.output.commandResult(
       "save",
       saved,
-      `saved ${saved.language || "script"} artifact (${saved.bytes} bytes) with ${saved.evidenceIds.length} Evidence provenance citation(s):\n  ${saved.path}`,
+      ctx.output.i18n.t("sessionResult.saved", { kind: saved.language || "script", bytes: saved.bytes, evidence: saved.evidenceIds.length, path: saved.path }),
     );
   });
 
   registry.register("rename", async (ctx, rest) => {
     const nextTitle = rest.trim();
     if (!nextTitle) {
-      ctx.output.fail("usage: /rename <new_chat_title>");
+      ctx.output.fail(ctx.output.i18n.t("common.usage", { command: "/rename <new_chat_title>" }));
       return;
     }
     const messages = ctx.agent?.history ?? [];
@@ -541,7 +549,7 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
         session: ctx.session.id,
         title: nextTitle,
       },
-      `renamed active chat session to "${nextTitle}"`,
+      ctx.output.i18n.t("sessionResult.renamed", { title: nextTitle }),
     );
   });
 
@@ -553,9 +561,9 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
       const id = parts[1];
       const resolution = parts[2];
       if (id && resolution) {
-        if (resolution !== "completed" && resolution !== "retry") {ctx.output.fail("usage: /resume reconcile <invocation-id> completed|retry <observation or decision>"); return;}
+        if (resolution !== "completed" && resolution !== "retry") {ctx.output.fail(ctx.output.i18n.t("common.usage", { command: "/resume reconcile <invocation-id> completed|retry <observation or decision>" })); return;}
         await ctx.runtime.events.resolve(id, resolution, parts.slice(3).join(" "));
-        ctx.output.commandResult("resume", {invocation_id: id, resolution}, `reconciled ${id} as ${resolution}; resume or continue when ready`);
+        ctx.output.commandResult("resume", {invocation_id: id, resolution}, ctx.output.i18n.t("sessionResult.reconciled", { id, resolution }));
       } else {
         const originDir = ctx.runtime.evidenceOrigin?.sourceDir ?? ctx.session.dir;
         const pending = await ctx.runtime.events.reconcileNativeJournal(join(originDir, "journal.jsonl"));
@@ -566,7 +574,7 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
     if (lowerArg.startsWith("rename ") || lowerArg.startsWith("title ")) {
       const nextTitle = arg.replace(/^(?:rename|title)\s+/i, "").trim();
       if (!nextTitle) {
-        ctx.output.fail("usage: /resume rename <new_chat_title>");
+        ctx.output.fail(ctx.output.i18n.t("common.usage", { command: "/resume rename <new_chat_title>" }));
         return;
       }
       await saveSessionHistory(
@@ -579,7 +587,7 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
       ctx.output.commandResult(
         "resume",
         { session: ctx.session.id, title: nextTitle },
-        `renamed active chat session to "${nextTitle}"`,
+        ctx.output.i18n.t("sessionResult.renamed", { title: nextTitle }),
       );
       return;
     }
@@ -593,7 +601,7 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
         ctx.output.commandResult(
           "resume",
           { sessions: [] },
-          "no previous saved sessions found in ~/.rea/sessions",
+          ctx.output.i18n.t("sessionResult.noSaved"),
         );
         return;
       }
@@ -618,13 +626,13 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
       ctx.output.commandResult("resume", { sessions: recent }, lines.join("\n"));
       return;
     }
-    if (ctx.activeAbort) { ctx.output.fail("Finish or cancel the active turn before resuming another session"); return; }
+    if (ctx.activeAbort) { ctx.output.fail(ctx.output.i18n.t("sessionResult.resumeBusy")); return; }
     const ui = ctx.output.ui;
     const previousHistory = ctx.agent?.history ?? [];
     const preview = ui ? await previewSavedSession(arg, ctx.session.id, ctx.sessionsRootDir) : null;
     if (preview) {
       ui?.hydrateFromHistory(preview.messages);
-      ui?.setBusy("restoring session");
+      ui?.setBusy(ctx.output.i18n.t("sessionResult.restoring"));
     }
     const loaded = await loadSavedSession(
       arg,
@@ -634,11 +642,11 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
     if (!loaded) {
       if (preview) ui?.hydrateFromHistory(previousHistory);
       ui?.setBusy(null);
-      ctx.output.fail(`no saved session history found matching "${arg}"`);
+      ctx.output.fail(ctx.output.i18n.t("sessionResult.notFound", { query: arg }));
       return;
     }
     if (!preview || preview.id !== loaded.summary.id) ui?.hydrateFromHistory(loaded.messages);
-    ui?.setBusy("restoring session");
+    ui?.setBusy(ctx.output.i18n.t("sessionResult.restoring"));
     try {
       const source = sessionInfoFromSummary(loaded.summary);
       const continuation = await forkSession(source, loaded.messages, loaded.summary.target, ctx.modelId, {label: "resume", rootDir: ctx.sessionsRootDir});
@@ -649,7 +657,7 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
     } catch (error) {
       ui?.setBusy(null);
       ui?.hydrateFromHistory(loaded.messages);
-      ctx.output.fail(`resume failed: ${errorMessageOf(error)}`);
+      ctx.output.fail(ctx.output.i18n.t("sessionResult.resumeFailed", { detail: errorMessageOf(error) }));
       return;
     }
     ctx.ensureAgentInitialized();
@@ -697,13 +705,16 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
     const restoredCount = ctx.agent
       ? Math.max(0, ctx.agent.history.length - 1)
       : loaded.messages.length;
+    const { t } = ctx.output.i18n;
     const carriedNote =
       unverifiedEvidence > 0
-        ? `\n${unverifiedEvidence} Evidence ID(s) from source session ${resumedId} are unverified in the active backend; re-run the tool or import an authenticated bundle before building on them.`
+        ? `\n${t("sessionResult.unverified", { count: unverifiedEvidence, session: resumedId })}`
         : "";
-    const repairNote = droppedMessages > 0 ? `\nDiscarded ${droppedMessages} invalid or incomplete saved message(s).` : "";
-    const archiveNote = loaded.archivedMessages > 0 ? `\n${loaded.archivedMessages} earlier messages remain in the source history on disk.` : "";
-    const bannerText = `resumed session **#${loaded.summary.index} [${resumedShort}]** · **${resumedTitle}** (\`${resumedId}\` · ${restoredCount} messages${resumedTarget ? ` · target \`${resumedTarget}\`` : ""})${carriedNote}${repairNote}${archiveNote}`;
+    const repairNote = droppedMessages > 0 ? `\n${t("sessionResult.discarded", { count: droppedMessages })}` : "";
+    const archiveNote = loaded.archivedMessages > 0 ? `\n${t("sessionResult.archived", { count: loaded.archivedMessages })}` : "";
+    const target = resumedTarget ? t("sessionResult.targetTag", { target: `\`${resumedTarget}\`` }) : "";
+    const banner = t("sessionResult.resumeBanner", { index: loaded.summary.index, short: resumedShort, title: resumedTitle, id: resumedId, count: restoredCount, target });
+    const bannerText = banner + carriedNote + repairNote + archiveNote;
     if (ctx.output.ui) {
       // The transcript is already on screen; re-render it only if the agent's repaired history differs.
       if (!preview && agentDropped === 0 && restoredCount === loaded.messages.length) ctx.output.ui.addSystem(bannerText);
@@ -742,18 +753,19 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
           interrupted_turn: loaded.inFlight,
           target: ctx.currentTarget,
         },
-        `resumed session ${resumedId} [${resumedShort}] "${resumedTitle}" (${restoredCount} messages restored${ctx.currentTarget ? ` · target ${ctx.currentTarget}` : ""})${carriedNote}${repairNote}`,
+        t("sessionResult.resumed", { id: resumedId, short: resumedShort, title: resumedTitle, count: restoredCount,
+          target: ctx.currentTarget ? t("sessionResult.targetTag", { target: ctx.currentTarget }) : "" }) + carriedNote + repairNote,
       );
     }
     // The previous process died mid-turn: pick the investigation back up without a manual "continue".
     if (loaded.inFlight && ctx.agent && !ctx.opts.noModel) {
       const pending = await ctx.runtime.events.unresolved();
       if (pending.some((intent) => !intent.readOnly)) {
-        ctx.output.fail("Interrupted side effects have uncertain outcomes. Inspect /resume reconcile before continuing; no operation was automatically repeated.");
+        ctx.output.fail(ctx.output.i18n.t("sessionResult.reconcileFirst"));
         return;
       }
       ctx.output.ui?.addSystem(
-        "previous turn was interrupted (crash / kill / power loss) · continuing from the last completed step",
+        ctx.output.i18n.t("sessionResult.interrupted"),
       );
       await ctx.runTurn(INTERRUPTED_TURN_PROMPT, "resume: interrupted turn");
     }
@@ -763,7 +775,7 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
     const rawCount = rest.trim();
     const count = rawCount ? Number.parseInt(rawCount, 10) : 1;
     if (!Number.isFinite(count) || count < 1) {
-      ctx.output.fail("usage: /rewind [turns] (positive integer, default 1)");
+      ctx.output.fail(ctx.output.i18n.t("common.usage", { command: "/rewind [turns] (positive integer, default 1)" }));
       return;
     }
     if (!ctx.agent || ctx.agent.history.length <= 1) {
@@ -775,7 +787,7 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
           remaining_turns: 0,
           remaining_messages: 0,
         },
-        "nothing to rewind (conversation history is empty)",
+        ctx.output.i18n.t("sessionResult.noRewind"),
       );
       return;
     }
@@ -806,7 +818,7 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
   });
 
   registry.register("fork", async (ctx, rest) => {
-    if (ctx.activeAbort) {ctx.output.fail("Finish or cancel the active turn before forking");return;}
+    if (ctx.activeAbort) {ctx.output.fail(ctx.output.i18n.t("sessionResult.forkBusy"));return;}
     const label = rest.trim() || undefined;
     const sourceId = ctx.session.id;
     const messages = ctx.agent?.history ?? [];
@@ -840,7 +852,7 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
         text,
       );
     } catch (error) {
-      ctx.output.fail(`fork failed: ${errorMessageOf(error)}`);
+      ctx.output.fail(ctx.output.i18n.t("sessionResult.forkFailed", { detail: errorMessageOf(error) }));
     }
   });
 
@@ -859,13 +871,13 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
       ctx.output.commandResult(
         "compact",
         {},
-        "nothing to compact yet (no conversation)",
+        ctx.output.i18n.t("sessionResult.noCompact"),
       );
       return;
     }
     if (ctx.activeAbort) {
       ctx.output.fail(
-        "a turn is running; wait for it or press esc before compacting",
+        ctx.output.i18n.t("sessionResult.compactionBusy"),
       );
       return;
     }
@@ -904,7 +916,7 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
       }
     }
     ctx.activeAbort = new AbortController();
-    ctx.output.ui?.setBusy(`compacting context (${strategy})`);
+    ctx.output.ui?.setBusy(ctx.output.i18n.t("sessionResult.compacting", { strategy }));
     try {
       const report = await ctx.agent.compactWith(
         strategy,
@@ -1104,7 +1116,7 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
     if (ctx.opts.json) {
       ctx.output.emit("command.result", { command: "clear", payload: {} });
     } else if (!ctx.output.ui) {
-      ctx.output.write("conversation cleared");
+      ctx.output.write(ctx.output.i18n.t("sessionResult.cleared"));
     }
   });
 

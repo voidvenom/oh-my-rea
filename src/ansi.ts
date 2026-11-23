@@ -69,7 +69,7 @@ const isWideCodePoint = (cp: number): boolean =>
 export const codePointWidth = (cp: number): number => {
   if (cp < 0x20 || (cp >= 0x7f && cp < 0xa0)) return 0;
   if (isZeroWidth(cp)) return 0;
-  return isWideCodePoint(cp) ? 2 : 1;
+  return cp === 0x26a1 || isWideCodePoint(cp) ? 2 : 1; // ⚡ has emoji presentation.
 };
 
 /** Visual terminal column width of a string (ignoring ANSI SGR codes). */
@@ -870,6 +870,7 @@ export const renderMarkdown = (
   theme: ColorTheme,
   streaming = false,
   preSanitized = false,
+  language: "en" | "tr" = "en",
 ): string[] => {
   if (width <= 4) return [];
   const clean = preSanitized ? raw : sanitizeText(raw);
@@ -936,11 +937,11 @@ export const renderMarkdown = (
       const lower = title.toLowerCase();
       if (lower.startsWith("observed") || lower.startsWith("gözlemlenen")) {
         lines.push(
-          `${theme.pillMintBg}${theme.neonMint}${theme.bold} ◈ ${title.toUpperCase()} ${theme.reset}`,
+          `${theme.pillMintBg}${theme.neonMint}${theme.bold} ◈ ${title.toLocaleUpperCase(language)} ${theme.reset}`,
         );
       } else if (lower.startsWith("inferred") || lower.startsWith("çıkarım")) {
         lines.push(
-          `${theme.pillVioletBg}${theme.violet}${theme.bold} ◇ ${title.toUpperCase()} ${theme.reset}`,
+          `${theme.pillVioletBg}${theme.violet}${theme.bold} ◇ ${title.toLocaleUpperCase(language)} ${theme.reset}`,
         );
       } else if (
         lower.startsWith("unresolved") ||
@@ -948,14 +949,14 @@ export const renderMarkdown = (
         lower.startsWith("bilinmeyen")
       ) {
         lines.push(
-          `${theme.pillAmberBg}${theme.amber}${theme.bold} △ ${title.toUpperCase()} ${theme.reset}`,
+          `${theme.pillAmberBg}${theme.amber}${theme.bold} △ ${title.toLocaleUpperCase(language)} ${theme.reset}`,
         );
       } else if (
         lower.startsWith("not examined") ||
         lower.startsWith("incelenmeyen")
       ) {
         lines.push(
-          `${theme.muted}${theme.bold}◌ ${title.toUpperCase()}${theme.reset}`,
+          `${theme.muted}${theme.bold}◌ ${title.toLocaleUpperCase(language)}${theme.reset}`,
         );
       } else if (
         lower.startsWith("recommendation") ||
@@ -964,7 +965,7 @@ export const renderMarkdown = (
         lower.startsWith("sonraki adım")
       ) {
         lines.push(
-          `${theme.pillCyanBg}${theme.neonCyan}${theme.bold} ✦ ${title.toUpperCase()} ${theme.reset}`,
+          `${theme.pillCyanBg}${theme.neonCyan}${theme.bold} ✦ ${title.toLocaleUpperCase(language)} ${theme.reset}`,
         );
       } else {
         const marker = level === 1 ? "◆" : level === 2 ? "◈" : "▸";

@@ -3,6 +3,7 @@ import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { fixtureEnvironment } from "../scripts/fixture-environment.mjs";
 
 const root = await mkdtemp(join(tmpdir(), "omr-unit-"));
 try {
@@ -14,6 +15,7 @@ try {
   if (tests.length === 0) throw new Error("No unit tests found");
 
   const env = {
+    ...fixtureEnvironment(),
     HOME: root,
     USERPROFILE: root,
     XDG_CONFIG_HOME: join(root, "config"),
@@ -25,16 +27,11 @@ try {
     TMPDIR: root,
     TMP: root,
     TEMP: root,
-    LANG: "C.UTF-8",
     DOCKER_HOST: `unix://${join(root, "docker.sock")}`,
-    ...(process.platform === "win32" ? {
-      SystemRoot: process.env.SystemRoot,
-      ComSpec: process.env.ComSpec,
-      PATHEXT: process.env.PATHEXT,
-      PATH: [dirname(process.execPath), join(process.env.SystemRoot ?? "C:\\Windows", "System32")].join(delimiter),
-    } : {
-      PATH: [dirname(process.execPath), "/usr/bin", "/bin", "/usr/local/bin"].join(delimiter),
-    }),
+    PATH: (process.platform === "win32"
+      ? [dirname(process.execPath), join(process.env.SystemRoot ?? "C:\\Windows", "System32")]
+      : [dirname(process.execPath), "/usr/bin", "/bin", "/usr/local/bin"]
+    ).join(delimiter),
   };
   const guard = fileURLToPath(new URL("fixtures/unit-network.mjs", testDir));
   const child = spawn(process.execPath, ["--import", guard, "--test", ...tests], {

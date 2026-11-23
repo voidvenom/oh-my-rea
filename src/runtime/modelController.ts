@@ -263,7 +263,8 @@ export class ModelController {
       ? candidates[0]!.client
       : new FailoverModelClient(candidates, (notice) => {
       this.modelId = notice.to;
-      const msg = `model failover: ${notice.from} → ${notice.to} (${notice.reason})`;
+      const msg = this.output.i18n.t("commandResult.modelFailover", notice)
+        || `model failover: ${notice.from} → ${notice.to} (${notice.reason})`;
       if (this.output.ui) {
         this.output.ui.addSystem(`**⚡ ${msg}**`);
         this.output.ui.setStatus({ model: notice.to });
@@ -381,7 +382,7 @@ export class ModelController {
     if (this.noModel) {
       ui.showOutput(
         "model",
-        "model switching is disabled when launched with --no-model",
+        this.output.i18n.t("commandResult.modelDisabled"),
       );
       return;
     }
@@ -409,7 +410,7 @@ export class ModelController {
     if (this.noModel) {
       ui.showOutput(
         "effort",
-        "thinking effort is disabled when launched with --no-model",
+        this.output.i18n.t("commandResult.effortDisabled"),
       );
       return;
     }
@@ -429,7 +430,7 @@ export class ModelController {
     if (this.noModel) {
       ui.showOutput(
         "compaction",
-        "compaction model selection is disabled when launched with --no-model",
+        this.output.i18n.t("commandResult.compactionDisabled"),
       );
       return;
     }

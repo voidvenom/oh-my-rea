@@ -12,6 +12,8 @@ Prints one JSON object: {"marks": {name: ms-since-spawn | null}, "firstByteMs": 
 (+ --type-delay-ms), which is how an impatient user types before the UI is ready.
 `--send-after-alt` writes TEXT 50 ms after the alternate screen appears (a user pressing Enter as soon as
 the UI shows up).
+The probe passes its environment through to the child. Callers matching translated output must
+choose the child's locale. Marks and typed text are encoded as UTF-8.
 """
 import fcntl, json, os, pty, select, signal, struct, sys, termios, time
 

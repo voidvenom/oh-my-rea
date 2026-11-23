@@ -1,10 +1,12 @@
 import { SCHEMA_VERSION } from "../render.js";
+import { I18n } from "../i18n/index.js";
 import type { TerminalUi } from "../tui.js";
 import { errorMessageOf } from "./utils.js";
 import { OUTCOME_PRIORITY, exitCodeFor, type ExecutionOutcome, type ExecutionStatus } from "../outcome.js";
 
 export interface OutputSinkOptions {
   readonly json: boolean;
+  readonly i18n?: I18n;
   readonly writeStdout?: ((text: string) => void) | undefined;
   readonly writeStderr?: ((text: string) => void) | undefined;
 }
@@ -14,6 +16,7 @@ export interface OutputSinkOptions {
  * including once-per-session persistence warnings so disk failures are never silently swallowed.
  */
 export class OutputSink {
+  readonly i18n: I18n;
   private uiInstance: TerminalUi | null = null;
   private readonly warnedPersistenceScopes = new Set<string>();
   private readonly stdoutWriter: (text: string) => void;
@@ -41,6 +44,7 @@ export class OutputSink {
   }
 
   constructor(private readonly options: OutputSinkOptions) {
+    this.i18n = options.i18n ?? new I18n();
     this.stdoutWriter =
       options.writeStdout ?? ((text: string) => process.stdout.write(text));
     this.stderrWriter =
@@ -68,7 +72,7 @@ export class OutputSink {
   }
 
   writeError(text: string): void {
-    this.stderrWriter(`error: ${text}\n`);
+    this.stderrWriter(`${this.i18n.t("common.error", { message: text }) || `error: ${text}`}\n`);
   }
 
   emit(type: string, data: Record<string, unknown>): void {
@@ -81,7 +85,7 @@ export class OutputSink {
   fail(message: string): void {
     this.recordOutcome({ status: "failed", finishReason: null });
     if (this.options.json) this.emit("error", { message });
-    else if (this.uiInstance) this.uiInstance.showOutput("error", message);
+    else if (this.uiInstance) this.uiInstance.showOutput(this.i18n.t("common.errorTitle") || "error", message);
     else this.writeError(message);
   }
 
@@ -109,7 +113,7 @@ export class OutputSink {
     if (this.warnedPersistenceScopes.has(scope)) return;
     this.warnedPersistenceScopes.add(scope);
     const detail = errorMessageOf(error);
-    const message = `session persistence warning (${scope}): ${detail}`;
+    const message = this.i18n.t("common.persistence", { scope, detail }) || `session persistence warning (${scope}): ${detail}`;
     if (this.options.json) {
       this.emit("persistence.warning", { scope, message: detail });
     } else if (this.uiInstance) {

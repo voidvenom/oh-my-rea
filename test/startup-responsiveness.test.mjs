@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, copyFile, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, copyFile, cp, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -54,9 +54,10 @@ test("REA detection searches PATH instead of running rea, and updateNotice never
     const dist = join(omr, "dist");
     await mkdir(dist, { recursive: true });
     await writeFile(join(omr, "package.json"), '{"type":"module"}');
-    for (const name of ["env.js", "setup.js", "reaLauncher.js", "version.js"]) {
+    for (const name of ["ansi.js", "env.js", "setup.js", "reaLauncher.js", "version.js"]) {
       await copyFile(new URL(`../dist/${name}`, import.meta.url), join(dist, name));
     }
+    await cp(new URL("../dist/i18n/", import.meta.url), join(dist, "i18n"), { recursive: true });
     const { detectRea, detectReaExact, ensureRea, findOnPath, updateNotice } = await import(pathToFileURL(join(dist, "setup.js")).href);
     const { resolveReaLauncher } = await import(pathToFileURL(join(dist, "reaLauncher.js")).href);
 

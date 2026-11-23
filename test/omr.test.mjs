@@ -1,3 +1,5 @@
+import { englishI18n } from "../dist/i18n/index.js";
+
 import assert from "node:assert/strict";
 import { appendFile, mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -157,6 +159,8 @@ import {
   transcodeBmpToPng,
 } from "../dist/vision.js";
 
+const englishUi = await englishI18n();
+
 describe("ansi sanitization, width, and markdown", () => {
   it("strips dangerous terminal escape sequences and expands tabs", () => {
     const malicious =
@@ -233,6 +237,7 @@ describe("binary magic & flowing binary art", () => {
       assert.equal(visibleWidth(lane), 26);
 
       const hero = renderHeroLines({
+        i18n: englishUi,
         width: 92,
         height: 28,
         tick: 4,
@@ -502,6 +507,7 @@ describe("TerminalUi layout & frame invariants", () => {
       TERM: "xterm-256color",
     });
     const ui = new TerminalUi({
+      i18n: englishUi,
       commands: COMMANDS,
       theme,
       onSubmit: () => {},
@@ -605,6 +611,7 @@ describe("TerminalUi layout & frame invariants", () => {
     let picked = null;
     let pickedEffort = null;
     const pickerUi = new TerminalUi({
+      i18n: englishUi,
       commands: COMMANDS,
       theme,
       providers: () => providers,
@@ -1959,6 +1966,7 @@ describe("omp-style context compaction and the 1M context meter", () => {
       TERM: "xterm-256color",
     });
     const ui = new TerminalUi({
+      i18n: englishUi,
       commands: COMMANDS,
       theme,
       onSubmit: () => {},
@@ -3078,6 +3086,7 @@ describe("Project AGENTS.md instructions and Ctrl+Backspace word delete", () => 
     });
     const make = (text) => {
       const ui = new TerminalUi({
+        i18n: englishUi,
         commands: COMMANDS,
         theme,
         onSubmit: () => {},
@@ -3580,6 +3589,7 @@ describe("omr_run: verified script execution and CDP hardening", () => {
     await new Promise((resolve) => srv.listen(0, "127.0.0.1", resolve));
     const port = srv.address().port;
     const code = `import socket\ns = socket.socket()\ns.settimeout(2)\ntry:\n    s.connect(('127.0.0.1', ${port}))\n    print('CONNECTED')\nexcept OSError:\n    print('BLOCKED')\n`;
+
     try {
       await withScripts(async (broker) => {
         const isolated = await broker.dispatch("omr_run", {
@@ -3969,6 +3979,7 @@ describe("Network Guard (◈ net guard): outage hold, live ping probe, and mid-s
       });
 
       const ui = new TerminalUi({
+        i18n: englishUi,
         commands: COMMANDS,
         theme: createTheme({ COLORTERM: "truecolor", TERM: "xterm-256color" }),
         onSubmit: () => {},
@@ -4034,6 +4045,7 @@ describe("Network Guard (◈ net guard): outage hold, live ping probe, and mid-s
       TERM: "xterm-256color",
     });
     const ui = new TerminalUi({
+      i18n: englishUi,
       commands: COMMANDS,
       theme,
       onSubmit: () => {},
@@ -4421,6 +4433,7 @@ describe("Live TUI & Agent UX: steering, double-enter, wheel scroll, unrestricte
 
   it("allows deleting the very first bracketed paste with Backspace immediately (no stuck pasteMode)", () => {
     const ui = new TerminalUi({
+      i18n: englishUi,
       commands: COMMANDS,
       theme,
       onSubmit: () => {},
@@ -4444,6 +4457,7 @@ describe("Live TUI & Agent UX: steering, double-enter, wheel scroll, unrestricte
   it("scrolls chat timeline on SGR mouse wheel and arrow bursts without triggering input history, while single Up arrow recalls history", () => {
     const submitted = [];
     const ui = new TerminalUi({
+      i18n: englishUi,
       commands: COMMANDS,
       theme,
       onSubmit: (line) => submitted.push(line),
@@ -4493,6 +4507,7 @@ describe("Live TUI & Agent UX: steering, double-enter, wheel scroll, unrestricte
     const submissions = [];
     const queued = [];
     const ui = new TerminalUi({
+      i18n: englishUi,
       commands: COMMANDS,
       theme,
       onSubmit: (line, opts) => {
@@ -4539,6 +4554,7 @@ describe("Live TUI & Agent UX: steering, double-enter, wheel scroll, unrestricte
 
   it("renders unrestricted omp-style thinking blocks without 3-line clipping or post-turn text wipe", () => {
     const ui = new TerminalUi({
+      i18n: englishUi,
       commands: COMMANDS,
       theme,
       onSubmit: () => {},
@@ -4575,6 +4591,7 @@ describe("Live TUI & Agent UX: steering, double-enter, wheel scroll, unrestricte
     let copiedText = "";
     let submittedOpts = null;
     const ui = new TerminalUi({
+      i18n: englishUi,
       commands: COMMANDS,
       theme,
       onSubmit: (_line, opts) => {
@@ -4657,6 +4674,7 @@ describe("Live TUI & Agent UX: steering, double-enter, wheel scroll, unrestricte
   it("hydrates full conversation history into TUI timeline, HUD recent calls, and composer history on /resume, and opens omp-style session picker modal", () => {
     let submittedLine = null;
     const ui = new TerminalUi({
+      i18n: englishUi,
       commands: COMMANDS,
       theme,
       onSubmit: (line) => {
@@ -4771,6 +4789,7 @@ describe("Live TUI & Agent UX: steering, double-enter, wheel scroll, unrestricte
   it("renders real-time & per-turn TPS in bottom status bar and HUD, fetches all endpoint models with capability tags, derives work-based session titles, and supports #index / shortId resume", async () => {
     let submittedLine = null;
     const ui = new TerminalUi({
+      i18n: englishUi,
       commands: COMMANDS,
       onSubmit: (line) => {
         submittedLine = line;
@@ -5171,6 +5190,7 @@ describe("Vision, Chat Image Attachment, Multi-Source Screenshots, @file/@image 
 
       // 2. TUI `@` autocomplete popup and Tab completion
       const ui = new TerminalUi({
+        i18n: englishUi,
         commands: COMMANDS,
         cwd: tmpDir,
         onSubmit: () => {},
@@ -5337,6 +5357,7 @@ describe("Vision, Chat Image Attachment, Multi-Source Screenshots, @file/@image 
       //    - KDE Klipper placeholder bracketed paste (\x1b[200~▨ 16 × 9\x1b[201~)
       const submitted = [];
       const ui = new TerminalUi({
+        i18n: englishUi,
         commands: COMMANDS,
         cwd: tmpDir,
         onSubmit: (line, opts) => {
@@ -5361,7 +5382,7 @@ describe("Vision, Chat Image Attachment, Multi-Source Screenshots, @file/@image 
 
       // Composer frame shows staged image count and prompt placeholder
       const frame = stripAnsi(ui.renderFrame(120, 32).lines.join("\n"));
-      assert.match(frame, /prompt · 📎 2 görsel/);
+      assert.match(frame, /prompt · 📎 2 images/);
 
       // Running a slash command (/image) does NOT consume staged images in submit()
       ui.handleText("/image\r");
@@ -5461,6 +5482,7 @@ describe("Uninterrupted turns: empty tool_calls recovery & robust terminal input
   const makeUi = (over = {}) => {
     const events = { interrupts: 0, exits: 0 };
     const ui = new TerminalUi({
+      i18n: englishUi,
       commands: COMMANDS,
       theme: createTheme({ COLORTERM: "truecolor", TERM: "xterm-256color" }),
       onSubmit: () => {},

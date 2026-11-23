@@ -1,3 +1,5 @@
+import { visibleWidth } from "./ansi.js";
+import type { I18n, MessageKey } from "./i18n/index.js";
 import type { CustomCommandSpec } from "./customCommands.js";
 import { OMR_PROFILES } from "./profiles.js";
 import { OMR_WORKFLOWS, type OmrWorkflowSpec } from "./prompts.js";
@@ -1142,6 +1144,16 @@ const LOCAL_COMMANDS: readonly Command[] = [
     source: "builtin",
   },
   {
+    name: "lang",
+    aliases: ["language"],
+    description: "Show or switch the interface language",
+    kind: "local",
+    argument: "optional",
+    usage: "/lang [en|tr] [--save]",
+    requires: {},
+    source: "builtin",
+  },
+  {
     name: "help",
     aliases: ["?"],
     description: "Show commands and TUI keyboard shortcuts",
@@ -1206,54 +1218,48 @@ export const findCommand = (
   );
 };
 
-export const helpText = (
-  customSpecs: readonly CustomCommandSpec[] = [],
-): string => {
+type CommandKey = Extract<MessageKey, `command.${string}`>;
+type ArgumentKey = Exclude<Extract<MessageKey, `argument.${string}`>, "argument.spawn.delegate">;
+
+const commandDescription = (command: { name: string; description: string; source?: "builtin" | "custom" }, i18n: I18n): string =>
+  (command.source !== "custom" && i18n.t(`command.${command.name}` as CommandKey)) || command.description;
+
+export const localizeCommand = <T extends {
+  name: string; description: string; source?: "builtin" | "custom"; paletteArgs?: readonly PaletteSubArg[];
+}>(command: T, i18n: I18n): T => {
+  const paletteArgs = command.paletteArgs?.map((arg) => {
+    let description = i18n.t(`argument.${command.name}.${arg.id}` as ArgumentKey);
+    if (command.name === "spawn" && arg.id !== "--bg") {
+      const subcommand = findCommand(arg.id);
+      if (subcommand) {
+        description = i18n.t("argument.spawn.delegate", {
+          name: subcommand.name, description: commandDescription(subcommand, i18n),
+        });
+      }
+    }
+    return { ...arg, description: description || arg.description };
+  });
+  return {
+    ...command, description: commandDescription(command, i18n),
+    ...(paletteArgs ? { paletteArgs } : {}),
+  };
+};
+
+export const helpText = (customSpecs: readonly CustomCommandSpec[], i18n: I18n): string => {
+  const { t } = i18n;
   const local = COMMANDS.filter((command) => command.kind === "local");
   const guided = COMMANDS.filter((command) => command.kind !== "local");
   const line = (command: Command): string => {
     const label = command.usage ?? `/${command.name}`;
-    return `  ${label.padEnd(32)}${command.description}`;
+    return `  ${label}${" ".repeat(Math.max(2, 32 - visibleWidth(label)))}${commandDescription(command, i18n)}`;
   };
-  const sections: string[] = [
-    "GUIDED WORKFLOWS, SUBAGENTS & PROMPTS (model + REA Evidence)",
-    ...guided.map(line),
-    "",
-    "DETERMINISTIC COMMANDS (local, zero tokens)",
-    ...local.map(line),
-    "",
-    "SHELL PASSTHROUGH & INLINE @MENTIONS (zero tokens / context staging)",
-    "  !<cmd>                          Run <cmd> locally in cwd and print stdout/stderr (zero tokens)",
-    "  !!<cmd>                         Run <cmd> locally and attach output to the next agent turn",
-    "  !! / !!clear                    Inspect or clear staged !! shell outputs",
-    "  @<image.png>                    Inline mention in prompt — auto-attaches image for vision analysis",
-    "  @<file[:start-end]>             Inline mention in prompt — injects file or line range into context",
+  const sections = [
+    t("help.workflows"), ...guided.map(line), "",
+    t("help.local"), ...local.map(line), "", t("help.shell"),
   ];
   if (customSpecs.length > 0) {
-    sections.push(
-      "",
-      "CUSTOM MARKDOWN COMMANDS (.omr/commands & ~/.config/rea/omr/commands)",
-      ...customSpecs.map((spec) => line(toCustomCommand(spec))),
-    );
+    sections.push("", t("help.custom"), ...customSpecs.map((spec) => line(toCustomCommand(spec))));
   }
-  sections.push(
-    "",
-    "KEYBOARD SHORTCUTS (TUI)",
-    "  Enter                  Send prompt (while busy: 1× queues steer, 2× interrupts immediately)",
-    "  Shift+Enter / Ctrl+J   Insert newline in multi-line composer",
-    "  Ctrl+V                 Smart paste: attaches clipboard image (📎 chip) or pastes text",
-    "  Alt+S                  Quick screenshot / visual binary entropy heatmap capture",
-    "  @                      Open inline @file / @image mention autocomplete popup",
-    "  Alt+M / F2             Open interactive Model & Provider Selector",
-    "  Alt+E                  Open Thinking / Reasoning Effort Selector",
-    "  Alt+C                  Open Compaction Model Selector (assign another AI for compaction)",
-    "  / or Ctrl+K            Open fuzzy slash command & argument palette",
-    "  Tab / Right            Accept inline ghost hint or complete command/path/@mention",
-    "  Ctrl+O                 Expand/close full-screen scrollable output inspector",
-    "  Ctrl+B                 Cycle live binary bitstream mode (on · eco · busy · off)",
-    "  PgUp / PgDn / Wheel    Scroll timeline, model list, or inspector",
-    "  Esc / Ctrl+C           Cancel active model/tool turn, close overlay, or exit",
-    "  Ctrl+D                 Exit when composer is empty",
-  );
+  sections.push("", t("help.shortcuts"));
   return sections.join("\n");
 };

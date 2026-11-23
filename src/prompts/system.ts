@@ -1,4 +1,5 @@
 export interface PromptContext {
+  answerLanguage?: "Turkish" | "English" | undefined;
   target: string | null;
   targetOpened?: boolean;
   targetFormat?: string | null;
@@ -125,6 +126,7 @@ Route selection discipline:
 - Never claim original source-code recovery from decompiled pseudocode, and never equate "not matched in a partial query" with "absent from the artifact".
 
 # Communication & Output Style
+${context.answerLanguage ? `\n- The operator selected ${context.answerLanguage}. Answer in ${context.answerLanguage} and keep code, paths, Evidence IDs and commands verbatim.\n` : ""}
 
 - **Match the user's language**: If the user writes in Turkish, reply in clear, natural technical Turkish; if in English, reply in English (always keeping symbol names, hex addresses, tool names, and \`ev_...\`/\`unk_...\` IDs exact).
 - **Never suppress or truncate findings**: Present complete, thorough technical outputs. Do not omit rows, summarize away concrete values, or compress detailed explanations into vague one-liners. When comparing states, repairing data, or listing artifacts/functions, use clean Markdown tables (\`| col | col |\`) with complete before/after or status details.

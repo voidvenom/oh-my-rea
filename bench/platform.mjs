@@ -4,13 +4,17 @@ import { mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promi
 import { arch, cpus, loadavg, platform, tmpdir, totalmem } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { fixtureEnvironment } from "../scripts/fixture-environment.mjs";
 
 const get = (flag, fallback) => { const index = process.argv.indexOf(flag); return index < 0 ? fallback : process.argv[index + 1]; };
 const samples = Number(get("--samples","10")); if (!Number.isInteger(samples) || samples < 5 || samples > 50) throw new Error("--samples must be 5–50");
 const real = process.argv.includes("--real-rea"); const root = await mkdtemp(join(tmpdir(),"omr-benchmark-driver-"));
 const cwd = fileURLToPath(new URL("..",import.meta.url));
 const stats = values => { const sorted = values.filter(Number.isFinite).sort((a,b) => a-b); return { n: sorted.length, min: sorted[0] ?? null, p50: sorted[Math.ceil(sorted.length*0.5)-1] ?? null, p95: sorted[Math.ceil(sorted.length*0.95)-1] ?? null, max: sorted.at(-1) ?? null }; };
-const env = { PATH: process.env.PATH, ...(process.env.OMR_REA_COMMAND ? { OMR_REA_COMMAND: process.env.OMR_REA_COMMAND } : {}) };
+const env = {
+  ...fixtureEnvironment(), HOME: root, USERPROFILE: root, XDG_CONFIG_HOME: join(root, "config"),
+  ...(process.env.OMR_REA_COMMAND ? { OMR_REA_COMMAND: process.env.OMR_REA_COMMAND } : {}),
+};
 const child = args => new Promise((resolve,reject) => {
   const start = performance.now(); const processChild = spawn(process.execPath,args,{cwd,env,stdio:["ignore","pipe","pipe"],detached:platform()!=="win32"}); let stdout="",stderr="";
   const stop = () => { try { if (platform()!=="win32") process.kill(-processChild.pid,"SIGKILL"); else processChild.kill("SIGKILL"); } catch {} };
@@ -23,7 +27,7 @@ const fingerprint = createHash("sha256");
 const sourcePaths=[];
 const walk=async directory=>{for(const entry of await readdir(join(cwd,directory),{withFileTypes:true})){const path=join(directory,entry.name);if(entry.isDirectory())await walk(path);else if(entry.name.endsWith(".ts"))sourcePaths.push(path);}};
 await walk("src");for(const path of sourcePaths.sort()){fingerprint.update(path.replaceAll("\\","/"));fingerprint.update(await readFile(join(cwd,path)));}
-const harness=createHash("sha256");for(const path of ["bench/platform.mjs","bench/worker.mjs","bench/memory-probe.cjs"]){harness.update(path);harness.update(await readFile(join(cwd,path)));}
+const harness=createHash("sha256");for(const path of ["bench/platform.mjs","bench/worker.mjs","bench/memory-probe.cjs","scripts/fixture-environment.mjs"]){harness.update(path);harness.update(await readFile(join(cwd,path)));}
 const report = { schema:"omr-benchmark/v1", status:"running", generatedAt:new Date().toISOString(), sourceFingerprint:fingerprint.digest("hex"),harnessFingerprint:harness.digest("hex"), environment:{node:process.version,platform:platform(),arch:arch(),logicalCpus:cpus().length,totalMemoryBytes:totalmem(),loadAverage:loadavg()}, method:{samples,percentile:"nearest-rank",coldMeaning:"fresh Node process and module cache; OS caches are not flushed",model:"controlled localhost SSE, no external API",memory:"Node process high-water RSS KiB; native child RSS is a Linux /proc sample, not its peak"},raw:{},summary:{} };
 const out=get("--out",null);
 const persist=async()=>{if(out){const path=resolve(out);await writeFile(`${path}.tmp`,`${JSON.stringify(report,null,2)}\n`);await rename(`${path}.tmp`,path);}};

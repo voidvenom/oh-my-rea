@@ -110,6 +110,10 @@ omr uses a 24-hour registry cache. The first interactive launch with an empty ca
 
 Use `omr changelog` for the installed version, `omr changelog 0.5.1` for a specific version, or `omr changelog --all` for the full history. In the TUI, `/changelog` opens a scrollable view. A new installed version shows a short summary once, either after `omr update` or on the first interactive launch with packaged notes. [Full changelog](CHANGELOG.md)
 
+## Language
+
+Use `omr --lang tr` for Turkish or `omr --lang en` for English. In the TUI, `/lang` shows the active language and `/lang tr --save` switches and saves it. Startup uses the flag, then `OMR_LANG`, then the saved preference, then the terminal locale. JSONL events remain in English.
+
 ## Requirements
 
 - Node.js `^22.23.4`, `^24.22.1` or `>=26.12.1` (REA's requirement)
@@ -127,7 +131,7 @@ npm test
 node bin/omr.js --help
 ```
 
-`npm test` runs the unit and integration fixtures with a temporary home and a controlled environment. Live provider and tool checks are separate scripts under `test/live-*.mjs`.
+`npm test` runs the unit and integration fixtures with a temporary home and a fixed English locale. Language tests supply their own locale or language override. Live provider and tool checks are separate scripts under `test/live-*.mjs`.
 
 When omr runs next to a REA checkout, it uses that checkout. Override with `OMR_REA_COMMAND`.
 

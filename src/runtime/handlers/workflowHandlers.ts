@@ -67,7 +67,7 @@ export const registerWorkflowHandlers = (registry: CommandRegistry): void => {
   registry.register("compare", async (ctx, rest, rawLine) => {
     const parts = splitShellTokens(rest);
     if (parts.length < 2) {
-      ctx.output.fail("usage: /compare <left_path> <right_path>");
+      ctx.output.fail(ctx.output.i18n.t("common.usage", { command: "/compare <left_path> <right_path>" }));
       return;
     }
     const leftPath = resolveTargetPath(parts[0]!, ctx.cwd);
@@ -83,7 +83,7 @@ export const registerWorkflowHandlers = (registry: CommandRegistry): void => {
   registry.register("diff-cve", async (ctx, rest, rawLine) => {
     const parts = splitShellTokens(rest);
     if (parts.length < 2) {
-      ctx.output.fail("usage: /diff-cve <left_path> <right_path> [focus]");
+      ctx.output.fail(ctx.output.i18n.t("common.usage", { command: "/diff-cve <left_path> <right_path> [focus]" }));
       return;
     }
     const leftPath = resolveTargetPath(parts[0]!, ctx.cwd);
@@ -123,7 +123,7 @@ export const registerWorkflowHandlers = (registry: CommandRegistry): void => {
               : head;
       goal = parts.slice(1).join(" ");
     } else if (parts.length === 1 && knownKinds.has(parts[0]!.toLowerCase())) {
-      ctx.output.fail("usage: /script <frida|python|gdb|rizin|yara> <goal>");
+      ctx.output.fail(ctx.output.i18n.t("common.usage", { command: "/script <frida|python|gdb|rizin|yara> <goal>" }));
       return;
     }
     ctx.output.ui?.addUser(rawLine);
@@ -140,28 +140,28 @@ export const registerWorkflowHandlers = (registry: CommandRegistry): void => {
     const sub = (parts[0] ?? "list").toLowerCase();
 
     if (["registry", "register", "verify", "activate", "deactivate", "remove", "run"].includes(sub)) {
-      if (ctx.activeAbort) { ctx.output.fail("Finish or cancel the active turn before changing or running Forge tools"); return; }
+      if (ctx.activeAbort) { ctx.output.fail(ctx.output.i18n.t("workflow.forgeBusy")); return; }
       const abort = new AbortController(); ctx.activeAbort = abort;
       try {
         await ctx.runtime.forge.initialize();
         let args: Record<string, unknown>;
         if (sub === "register") {
-          if (parts.length !== 3) throw new Error("usage: /forge register <spec-json-path> <source-path>");
+          if (parts.length !== 3) throw new Error(ctx.output.i18n.t("common.usage", { command: "/forge register <spec-json-path> <source-path>" }));
           args = { action: "register", spec: JSON.parse(await readFile(resolve(ctx.cwd, parts[1]!), "utf8")), code: await readFile(resolve(ctx.cwd, parts[2]!), "utf8") };
         } else if (sub === "run") {
           const match = /^run\s+(\S+)\s+([\s\S]+)$/.exec(rest);
-          if (!match) throw new Error("usage: /forge run <id> <input-json>");
+          if (!match) throw new Error(ctx.output.i18n.t("common.usage", { command: "/forge run <id> <input-json>" }));
           const name = ctx.runtime.forge.activeName(match[1]!);
           const tool = ctx.runtime.forge.tools().find(candidate => candidate.definition.function.name === name);
-          if (!tool) throw new Error(`No active verified Forge version: ${match[1]}`);
+          if (!tool) throw new Error(ctx.output.i18n.t("workflow.noForgeVersion", { id: match[1] }));
           const input: unknown = JSON.parse(match[2]!); const parsed = asRecord(input);
-          if (!parsed || Array.isArray(parsed)) throw new Error("Forge input must be a JSON object");
+          if (!parsed || Array.isArray(parsed)) throw new Error(ctx.output.i18n.t("workflow.forgeInput"));
           const result = await ctx.runtime.events.invoke({ backend: tool.backend, tool: tool.definition.function.name, args: parsed, readOnly: false, binding: ctx.runtime.binding }, () => tool.invoke(parsed, abort.signal), abort.signal);
           if (result.isError) ctx.output.fail(result.text); else ctx.output.commandResult("forge", result.structuredContent, result.text);
           return;
         } else {
-          if ((sub === "verify" || sub === "activate") && parts.length !== 3) throw new Error(`usage: /forge ${sub} <id> <version>`);
-          if ((sub === "deactivate" || sub === "remove") && !parts[1]) throw new Error(`usage: /forge ${sub} <id>${sub === "remove" ? " [version]" : ""}`);
+          if ((sub === "verify" || sub === "activate") && parts.length !== 3) throw new Error(ctx.output.i18n.t("common.usage", { command: `/forge ${sub} <id> <version>` }));
+          if ((sub === "deactivate" || sub === "remove") && !parts[1]) throw new Error(ctx.output.i18n.t("common.usage", { command: `/forge ${sub} <id>${sub === "remove" ? " [version]" : ""}` }));
           args = { action: sub === "registry" ? "list" : sub, ...(parts[1] ? { id: parts[1] } : {}), ...(parts[2] ? { version: parts[2] } : {}) };
         }
         const tool = ctx.runtime.localTools().find(candidate => candidate.definition.function.name === "omr_forge")!;
@@ -232,7 +232,7 @@ export const registerWorkflowHandlers = (registry: CommandRegistry): void => {
             );
       if (selected.length === 0) {
         ctx.output.fail(
-          `unknown forge preset "${query}". Available: ${FORGE_COMMAND_PRESETS.map((p) => p.name).join(", ")}, all`,
+          ctx.output.i18n.t("workflow.unknownForge", { query, presets: FORGE_COMMAND_PRESETS.map((p) => p.name).join(", ") }),
         );
         return;
       }
@@ -262,7 +262,7 @@ export const registerWorkflowHandlers = (registry: CommandRegistry): void => {
       const cmdName = parts[1]?.trim() ?? "";
       const goal = parts.slice(2).join(" ").trim();
       if (!cmdName || !goal) {
-        ctx.output.fail("usage: /forge command <name> <goal>");
+        ctx.output.fail(ctx.output.i18n.t("common.usage", { command: "/forge command <name> <goal>" }));
         return;
       }
       let createdPath = "";
@@ -286,7 +286,7 @@ export const registerWorkflowHandlers = (registry: CommandRegistry): void => {
         ctx.output.commandResult(
           "forge",
           { command: createdName, path: createdPath, goal },
-          `forged reusable slash command /${createdName} → ${createdPath}`,
+          ctx.output.i18n.t("workflow.forged", { name: createdName, path: createdPath }),
         );
         return;
       }
@@ -307,8 +307,8 @@ export const registerWorkflowHandlers = (registry: CommandRegistry): void => {
     if (ctx.opts.noModel || !ctx.modelController.modelInfo) {
       ctx.output.fail(
         ctx.opts.noModel
-          ? "/forge synthesis requires an active model (or use `/forge list` / `/forge install all` in --no-model mode)"
-          : `no model configured: ${ctx.modelController.modelError ?? "unknown error"}`,
+          ? ctx.output.i18n.t("workflow.forgeNeedsModel")
+          : ctx.output.i18n.t("workflow.noModel", { detail: ctx.modelController.modelError ?? "unknown error" }),
       );
       return;
     }
@@ -379,7 +379,7 @@ export const registerWorkflowHandlers = (registry: CommandRegistry): void => {
     if (sub === "pull") {
       const pkg = parts[1]?.trim();
       if (!pkg) {
-        ctx.output.fail("usage: /adb pull <package_name>");
+        ctx.output.fail(ctx.output.i18n.t("common.usage", { command: "/adb pull <package_name>" }));
         return;
       }
       const outDir = join(ctx.session.dir, "pulled");
@@ -468,7 +468,7 @@ export const registerWorkflowHandlers = (registry: CommandRegistry): void => {
         ctx.output.commandResult(
           "browser",
           res.payload,
-          `closed camofox tab ${tabId}`,
+          ctx.output.i18n.t("workflow.tabClosed", { id: tabId }),
         );
         return;
       }
@@ -477,8 +477,8 @@ export const registerWorkflowHandlers = (registry: CommandRegistry): void => {
         "browser",
         { closed_local: closedLocal },
         closedLocal
-          ? "closed active local browser session"
-          : "no active local browser session to close",
+          ? ctx.output.i18n.t("workflow.browserClosed")
+          : ctx.output.i18n.t("workflow.noBrowser"),
       );
       return;
     }
@@ -566,7 +566,7 @@ export const registerWorkflowHandlers = (registry: CommandRegistry): void => {
         const health = await ctx.browserManager.ensureCamofoxRunning();
         if (!health.reachable) {
           ctx.output.fail(
-            `camofox-browser is offline at ${health.baseUrl}: ${health.error ?? "not reachable"}`,
+            ctx.output.i18n.t("workflow.camofoxOffline", { url: health.baseUrl, detail: health.error ?? "not reachable" }),
           );
           return;
         }
@@ -634,14 +634,14 @@ export const registerWorkflowHandlers = (registry: CommandRegistry): void => {
     if (ctx.opts.noModel || !ctx.modelController.modelInfo) {
       ctx.output.fail(
         ctx.opts.noModel
-          ? "subagent delegation is disabled when launched with --no-model"
-          : `no model configured: ${ctx.modelController.modelError ?? "unknown error"}`,
+          ? ctx.output.i18n.t("workflow.subagentsDisabled")
+          : ctx.output.i18n.t("workflow.noModel", { detail: ctx.modelController.modelError ?? "unknown error" }),
       );
       return;
     }
     const rawParts = splitShellTokens(rest);
     if (rawParts.length === 0) {
-      ctx.output.fail("usage: /spawn [--bg] [workflow] <goal>");
+      ctx.output.fail(ctx.output.i18n.t("common.usage", { command: "/spawn [--bg] [workflow] <goal>" }));
       return;
     }
     let background = false;
@@ -654,7 +654,7 @@ export const registerWorkflowHandlers = (registry: CommandRegistry): void => {
       }
     }
     if (parts.length === 0) {
-      ctx.output.fail("usage: /spawn [--bg] [workflow] <goal>");
+      ctx.output.fail(ctx.output.i18n.t("common.usage", { command: "/spawn [--bg] [workflow] <goal>" }));
       return;
     }
     const candidateWf = findOmrWorkflow(parts[0]!);
@@ -664,7 +664,7 @@ export const registerWorkflowHandlers = (registry: CommandRegistry): void => {
       workflow = candidateWf.id;
       goal = parts.slice(1).join(" ").trim();
     } else if (candidateWf && parts.length === 1) {
-      ctx.output.fail(`usage: /spawn ${background ? "--bg " : ""}${candidateWf.id} <goal>`);
+      ctx.output.fail(ctx.output.i18n.t("common.usage", { command: `/spawn ${background ? "--bg " : ""}${candidateWf.id} <goal>` }));
       return;
     }
 
@@ -699,7 +699,7 @@ export const registerWorkflowHandlers = (registry: CommandRegistry): void => {
     }
 
     ctx.output.ui?.setBusy(
-      `running subagent${workflow ? ` (/${workflow})` : ""}`,
+      ctx.output.i18n.t("workflow.subagentRunning", { workflow: workflow ? ` (/${workflow})` : "" }),
     );
     try {
       const result = await ctx.subagentRunner.runTask({
@@ -719,7 +719,7 @@ export const registerWorkflowHandlers = (registry: CommandRegistry): void => {
       await ctx.syncLocalStatus();
       ctx.output.commandResult("spawn", result, rendered);
     } catch (error) {
-      ctx.output.fail(`subagent failed: ${errorMessageOf(error)}`);
+      ctx.output.fail(ctx.output.i18n.t("workflow.subagentFailed", { detail: errorMessageOf(error) }));
     } finally {
       ctx.output.ui?.setBusy(null);
     }
@@ -741,10 +741,10 @@ export const registerWorkflowHandlers = (registry: CommandRegistry): void => {
     const agentId = cleanTokens[0]?.trim() ?? "";
     const prompt = cleanTokens.slice(1).join(" ").trim();
     if (!agentId || !prompt) {
-      ctx.output.fail("usage: /steer [--bg] <sub-id> <correction_prompt>");
+      ctx.output.fail(ctx.output.i18n.t("common.usage", { command: "/steer [--bg] <sub-id> <correction_prompt>" }));
       return;
     }
-    ctx.output.ui?.setBusy(`steering ${agentId}`);
+    ctx.output.ui?.setBusy(ctx.output.i18n.t("workflow.steering", { id: agentId }));
     try {
       const steered = await ctx.subagentRunner.steer(agentId, prompt, {
         wait: !background,
@@ -801,12 +801,12 @@ export const registerWorkflowHandlers = (registry: CommandRegistry): void => {
     if (sub === "inspect" || sub === "watch" || sub === "show") {
       const targetId = tokens[1]?.trim() ?? "";
       if (!targetId) {
-        ctx.output.fail("usage: /subagents inspect <sub-id>");
+        ctx.output.fail(ctx.output.i18n.t("common.usage", { command: "/subagents inspect <sub-id>" }));
         return;
       }
       const node = ctx.subagentRunner.getNodeSnapshot(targetId);
       if (!node) {
-        ctx.output.fail(`no subagent found matching "${targetId}"`);
+        ctx.output.fail(ctx.output.i18n.t("workflow.subagentMissing", { query: targetId }));
         return;
       }
       ctx.output.commandResult(
@@ -824,7 +824,7 @@ export const registerWorkflowHandlers = (registry: CommandRegistry): void => {
 
     if (sub === "wait") {
       const ids = tokens.slice(1).filter(Boolean);
-      ctx.output.ui?.setBusy("waiting on background subagents");
+      ctx.output.ui?.setBusy(ctx.output.i18n.t("workflow.waiting"));
       try {
         const results = await ctx.subagentRunner.waitFor(
           ids.length > 0 ? ids : undefined,
@@ -844,18 +844,18 @@ export const registerWorkflowHandlers = (registry: CommandRegistry): void => {
     if (sub === "cancel" || sub === "kill" || sub === "stop") {
       const targetId = tokens[1]?.trim() ?? "";
       if (!targetId) {
-        ctx.output.fail("usage: /subagents cancel <sub-id>");
+        ctx.output.fail(ctx.output.i18n.t("common.usage", { command: "/subagents cancel <sub-id>" }));
         return;
       }
       const cancelled = ctx.subagentRunner.cancel(targetId);
       if (!cancelled) {
-        ctx.output.fail(`no subagent found matching "${targetId}"`);
+        ctx.output.fail(ctx.output.i18n.t("workflow.subagentMissing", { query: targetId }));
         return;
       }
       ctx.output.commandResult(
         "subagents",
         cancelled,
-        `cancelled subagent ${cancelled.id} (${cancelled.role})`,
+        ctx.output.i18n.t("workflow.cancelled", { id: cancelled.id, role: cancelled.role }),
       );
       return;
     }

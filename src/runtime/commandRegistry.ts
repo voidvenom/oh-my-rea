@@ -46,6 +46,7 @@ export class CommandRegistry {
     const checkpoint = ctx.output.outcomeCheckpoint();
     let keepRunning = true;
     try {
+      await ctx.output.i18n.initialize(ctx.opts.lang, ctx.env, ctx.opts.json);
       keepRunning = await this.runSlashLine(ctx, trimmedLine);
     } catch (error) {
       ctx.output.fail(error instanceof Error ? error.message : String(error));
@@ -56,6 +57,7 @@ export class CommandRegistry {
   }
 
   private async runSlashLine(ctx: OmrContext, trimmedLine: string): Promise<boolean> {
+    const { t } = ctx.output.i18n;
     const raw = trimmedLine.slice(1);
     const space = raw.search(/\s/);
     const typedName = space === -1 ? raw : raw.slice(0, space);
@@ -66,13 +68,11 @@ export class CommandRegistry {
     );
 
     if (!command) {
-      ctx.output.fail(
-        `unknown command /${typedName}; type / to open the command palette`,
-      );
+      ctx.output.fail(t("common.unknownCommand", { name: typedName }));
       return true;
     }
     if (command.argument === "required" && !rest) {
-      ctx.output.fail(`usage: ${command.usage ?? `/${command.name}`}`);
+      ctx.output.fail(t("common.usage", { command: command.usage ?? `/${command.name}` }));
       return true;
     }
     if (command.name === "exit") return false;
@@ -91,7 +91,7 @@ export class CommandRegistry {
     if (command.source === "custom") {
       const spec = ctx.customCommands.find((c) => c.name === command.name);
       if (!spec) {
-        ctx.output.fail(`custom command /${command.name} is no longer present`);
+        ctx.output.fail(t("common.customMissing", { name: command.name }));
         return true;
       }
       if (spec.effort && !ctx.opts.noModel && ctx.modelController.modelInfo) {
@@ -120,7 +120,7 @@ export class CommandRegistry {
 
     const handler = this.handlers.get(command.name);
     if (!handler) {
-      ctx.output.fail(`no handler registered for /${command.name}`);
+      ctx.output.fail(t("common.handlerMissing", { name: command.name }));
       return true;
     }
     await handler(ctx, rest, trimmedLine);

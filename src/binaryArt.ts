@@ -7,6 +7,7 @@ import {
   type ColorTheme,
 } from "./ansi.js";
 import { VERSION } from "./version.js";
+import type { I18n } from "./i18n/index.js";
 
 export interface TargetMagic {
   readonly path: string;
@@ -381,6 +382,7 @@ export const renderBinaryPulse = (
 };
 
 export interface HeroRenderContext {
+  readonly i18n: I18n;
   readonly width: number;
   readonly height: number;
   readonly tick: number;
@@ -409,6 +411,7 @@ const centerLine = (content: string, width: number): string => {
  */
 export const renderHeroLines = (ctx: HeroRenderContext): string[] => {
   const { width, height, tick, binaryEnabled, theme } = ctx;
+  const { t } = ctx.i18n;
   const bytes = ctx.magic?.bytes ?? DEFAULT_STREAM_BYTES;
   const lines: string[] = [];
   const effectiveTick = binaryEnabled ? tick : 0;
@@ -466,18 +469,19 @@ export const renderHeroLines = (ctx: HeroRenderContext): string[] => {
 
   // 2. Subtitle / Brand line
   const subtitle = theme.enabled
-    ? `${theme.neonMint}${theme.bold}OH-MY-REA${theme.reset} ${theme.subtle}v${VERSION}${theme.reset} ${theme.muted}· Evidence-Backed Binary & Application Forensics${theme.reset}`
-    : `OH-MY-REA v${VERSION} · Evidence-Backed Binary & Application Forensics`;
+    ? `${theme.neonMint}${theme.bold}OH-MY-REA${theme.reset} ${theme.subtle}v${VERSION}${theme.reset} ${theme.muted}· ${t("hero.subtitle")}${theme.reset}`
+    : `OH-MY-REA v${VERSION} · ${t("hero.subtitle")}`;
   lines.push(centerLine(subtitle, width));
 
   // 3. Live Hex + Binary Disassembler Waterfall Strip
   if (height >= 15 && width >= 44) {
     lines.push("");
     const stripWidth = Math.min(width - 2, 74);
+    const stream = ctx.i18n.upper(t("hero.stream"));
     const streamLabel = ctx.magic
-      ? ` LIVE BITSTREAM · ${ctx.magic.label.toUpperCase()}${ctx.magic.sizeBytes !== null ? ` · ${formatBytes(ctx.magic.sizeBytes)}` : ""} `
-      : " LIVE BITSTREAM · DISASSEMBLER TELEMETRY ";
-    const barFill = Math.max(2, stripWidth - streamLabel.length - 2);
+      ? ` ${stream} · ${ctx.magic.label.toUpperCase()}${ctx.magic.sizeBytes !== null ? ` · ${formatBytes(ctx.magic.sizeBytes)}` : ""} `
+      : ` ${stream} · ${ctx.i18n.upper(t("hero.disassembler"))} `;
+    const barFill = Math.max(2, stripWidth - visibleWidth(streamLabel) - 2);
     const leftBar = "─".repeat(Math.floor(barFill / 2));
     const rightBar = "─".repeat(barFill - leftBar.length);
     lines.push(
@@ -523,14 +527,14 @@ export const renderHeroLines = (ctx: HeroRenderContext): string[] => {
   const targetBadge = targetName
     ? `${theme.pillMintBg}${theme.neonMint}${theme.bold} ◈ ${targetName} ${theme.reset}`
     : ctx.candidates.length > 0
-      ? `${theme.pillAmberBg}${theme.amber} ◇ ${ctx.candidates.length} artifacts in cwd (/open + Tab) ${theme.reset}`
-      : `${theme.pillCyanBg}${theme.muted} ○ no target open (/open <path>) ${theme.reset}`;
+      ? `${theme.pillAmberBg}${theme.amber} ◇ ${t("hero.candidates", { count: ctx.candidates.length })} ${theme.reset}`
+      : `${theme.pillCyanBg}${theme.muted} ○ ${t("hero.noTarget")} ${theme.reset}`;
 
   const reaBadge = ctx.reaConnected
-    ? `${theme.emerald}● rea mcp (${ctx.reaTools} tools)${theme.reset}`
-    : `${theme.amber}◌ rea connecting…${theme.reset}`;
+    ? `${theme.emerald}● ${t("hero.rea", { count: ctx.reaTools })}${theme.reset}`
+    : `${theme.amber}◌ ${t("hero.connecting")}${theme.reset}`;
 
-  const shortModel = ctx.model.split("/").at(-1) || ctx.model || "unconfigured";
+  const shortModel = ctx.model === "no-model" || !ctx.model ? t("status.noModel") : ctx.model.split("/").at(-1) || ctx.model;
   const modelBadge = `${theme.violet}◆ ${shortModel}${theme.reset}`;
 
   lines.push(centerLine(`${targetBadge}  ${reaBadge}  ${modelBadge}`, width));
@@ -547,32 +551,32 @@ export const renderHeroLines = (ctx: HeroRenderContext): string[] => {
       rightDesc: string,
     ): string => {
       const leftCell = padEndAnsi(
-        `${theme.neonCyan}${leftCmd.padEnd(14)}${theme.reset}${theme.muted}${leftDesc}${theme.reset}`,
+        `${theme.neonCyan}${padEndAnsi(leftCmd, 15)}${theme.reset}${theme.muted}${leftDesc}${theme.reset}`,
         colW,
       );
       const rightCell = padEndAnsi(
-        `${theme.neonCyan}${rightCmd.padEnd(14)}${theme.reset}${theme.muted}${rightDesc}${theme.reset}`,
+        `${theme.neonCyan}${padEndAnsi(rightCmd, 15)}${theme.reset}${theme.muted}${rightDesc}${theme.reset}`,
         colW,
       );
       return centerLine(`${leftCell}  ${rightCell}`, width);
     };
     lines.push(
-      pair("/triage", "fast binary recon", "/investigate", "evidence workflow"),
+      pair("/triage", t("hero.triage"), "/investigate", t("hero.investigate")),
     );
     lines.push(
       pair(
         "/explain <fn>",
-        "decompile & cite",
+        t("hero.explain"),
         "/trace <sym>",
-        "call-path xrefs",
+        t("hero.trace"),
       ),
     );
     lines.push(
-      pair("/find <text>", "0-token search", "/model", "pick model (Alt+M)"),
+      pair("/find <text>", t("hero.find"), "/model", t("hero.model")),
     );
     if (height >= 26) {
       lines.push(
-        pair("/evidence", "inspect ledger", "/dashboard", "live web HUD"),
+        pair("/evidence", t("hero.evidence"), "/dashboard", t("hero.dashboard")),
       );
     }
   }

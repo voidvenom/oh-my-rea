@@ -20,3 +20,11 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      - name: Localized CLI tests under a Turkish host environment
+        env:
+          LANG: tr_TR.UTF-8
+          LC_ALL: tr_TR.UTF-8
+          LC_MESSAGES: tr_TR.UTF-8
+          LANGUAGE: tr
+          OMR_LANG: tr
+        run: node --test test/i18n.test.mjs test/update-notice.test.mjs

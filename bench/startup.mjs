@@ -12,8 +12,9 @@
  *   resume-tail          `omr --resume` of a large session: spawn -> last messages visible
  *   resume-complete      same run: spawn -> "resumed session" banner (REA connected, evidence restored)
  *
- * Everything is isolated: temp cwd, temp XDG config (model config pins its context window, update cache is
- * fresh so no network), generated session store. A real `rea` on PATH is used (override with OMR_REA_COMMAND)
+ * The fixture uses a temporary home, cwd, XDG config, and session store. English is pinned for the PTY
+ * output markers, including when --entry points at an older release. The update cache starts fresh.
+ * A real `rea` on PATH is used (override with OMR_REA_COMMAND)
  * because REA process start-up is part of what the user experiences.
  *
  *   node bench/startup.mjs [--samples 10] [--entry bin/omr.js] [--label name] [--out file.json]
@@ -27,6 +28,7 @@ import { createServer } from "node:net";
 import { arch, cpus, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { fixtureEnvironment } from "../scripts/fixture-environment.mjs";
 import { writeSessionStore } from "./startup-fixture.mjs";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
@@ -78,8 +80,18 @@ await writeConfig(xdg, { base_url: "http://127.0.0.1:9/v1", model: "bench-model"
 // No pinned window, no limits cache: the limits lookup must ask a provider that never answers.
 await writeConfig(slowXdg, { base_url: `http://127.0.0.1:${hangingPort}/v1`, model: "bench-slow", api_key_env: "BENCH_KEY" }, true);
 
-const baseEnv = { ...process.env, OMR_SESSIONS_DIR: sessions, XDG_CONFIG_HOME: xdg, BENCH_KEY: "bench" };
-delete baseEnv.NODE_COMPILE_CACHE;
+const baseEnv = {
+  ...fixtureEnvironment(),
+  HOME: root,
+  USERPROFILE: root,
+  OMR_SESSIONS_DIR: sessions,
+  XDG_CONFIG_HOME: xdg,
+  XDG_CACHE_HOME: join(root, "cache"),
+  XDG_DATA_HOME: join(root, "data"),
+  XDG_STATE_HOME: join(root, "state"),
+  BENCH_KEY: "bench",
+  ...(process.env.OMR_REA_COMMAND ? { OMR_REA_COMMAND: process.env.OMR_REA_COMMAND } : {}),
+};
 
 /** One sample: omr on a pty via the probe; `probeArgs` are probe options, `omrArgs` go to omr. */
 const sample = async (probeArgs, omrArgs, env, timeoutS) => {
@@ -101,7 +113,7 @@ const report = {
   generatedAt: new Date().toISOString(),
   label,
   entry,
-  environment: { node: process.version, platform: process.platform, arch: arch(), logicalCpus: cpus().length, rea },
+  environment: { node: process.version, platform: process.platform, arch: arch(), logicalCpus: cpus().length, rea, uiLanguage: baseEnv.OMR_LANG },
   method: {
     samples,
     percentile: "nearest-rank",

@@ -3,6 +3,7 @@ import type { LaunchOptions } from "./args.js";
 import { inspectTargetMagic } from "./binaryArt.js";
 import { releaseEarlyInput } from "./earlyInput.js";
 import { resolveReaEnv } from "./env.js";
+import { I18n } from "./i18n/index.js";
 import type { ChatImageBlock } from "./model.js";
 import {
   autonomousWorkflowNote,
@@ -38,6 +39,7 @@ export const createDefaultCommandRegistry = (): CommandRegistry => {
 export const runOmr = async (
   opts: LaunchOptions,
   deps?: OmrRuntimeDeps,
+  i18n = new I18n(),
 ): Promise<number> => {
   const cwd = deps?.cwd ?? process.cwd();
 
@@ -51,6 +53,7 @@ export const runOmr = async (
 
   if (!uiEnabled) releaseEarlyInput();
   const output = new OutputSink({
+    i18n,
     json: opts.json,
     writeStdout: deps?.writeStdout,
     writeStderr: deps?.writeStderr,
@@ -61,12 +64,14 @@ export const runOmr = async (
     const { env, sources } = deps?.env
       ? { env: deps.env, sources: [...(deps.envSources ?? [])] }
       : resolveReaEnv();
+    const languageReady = i18n.initialize(opts.lang, env, opts.json);
     const candidates = uiEnabled ? await listTargetCandidates(cwd) : [];
     const currentTarget = opts.target
       ? resolveTargetPath(opts.target, cwd)
       : uiEnabled ? (candidates.length === 1 ? candidates[0]! : null) : await detectTarget(cwd);
     const currentMagic = await inspectTargetMagic(currentTarget);
     const session = await createSession(currentTarget, null, { rootDir: deps?.sessionsRootDir });
+    await languageReady;
     ctx = new OmrContext({
       opts, cwd, env, sources, sessionsRootDir: deps?.sessionsRootDir,
       output, session, currentTarget, currentMagic, deps,
@@ -102,23 +107,22 @@ export const runOmr = async (
         session: session.id,
       });
       if (startupInstructions) ui.addSystem(
-        `loaded **AGENTS.md** (${startupInstructions.chars} chars${startupInstructions.truncated ? `, cut to ${PROJECT_INSTRUCTIONS_LIMIT}` : ""}) — re-read automatically when it changes · /agents.md for details`,
+        i18n.t("launch.instructions", { count: startupInstructions.chars, cut: startupInstructions.truncated ? i18n.t("launch.cut", { limit: PROJECT_INSTRUCTIONS_LIMIT }) : "" }), true,
       );
       if (ctx.activeProfile) ui.addSystem(
-        `active profile **${ctx.activeProfile.id}** (${ctx.activeProfile.summary}) · effort **${ctx.activeProfile.effort}**`,
+        i18n.t("launch.profile", { id: ctx.activeProfile.id, summary: ctx.activeProfile.summary, effort: ctx.activeProfile.effort }), true,
       );
       ui.setBusy(null);
     } else if (!opts.json) {
-      output.write(`omr ${VERSION} · ${ctx.currentTarget ?? "no target"} · session ${session.id}${ctx.activeProfile ? ` · profile ${ctx.activeProfile.id}` : ""}`);
-      output.write(`model ${ctx.modelId}${ctx.modelController.modelError && !opts.noModel ? ` (${ctx.modelController.modelError})` : ""}`);
-      if (startupInstructions) output.write(`agents.md ${startupInstructions.path} (${startupInstructions.chars} chars)`);
+      output.write(i18n.t("launch.session", { version: VERSION, target: ctx.currentTarget ?? i18n.t("hud.noTarget"), id: session.id, profile: ctx.activeProfile ? i18n.t("launch.profileTag", { id: ctx.activeProfile.id }) : "" }));
+      output.write(i18n.t("launch.model", { id: ctx.modelId, error: ctx.modelController.modelError && !opts.noModel ? ` (${ctx.modelController.modelError})` : "" }));
+      if (startupInstructions) output.write(i18n.t("launch.instructionsPath", { path: startupInstructions.path, count: startupInstructions.chars }));
     }
     if (opts.dashboard && !opts.command && !opts.goal) {
       const dashboard = ctx.startDashboard();
       if (!uiEnabled) await dashboard;
     }
   };
-
   const registry = createDefaultCommandRegistry();
   const runLine = async (
     line: string,
@@ -131,7 +135,7 @@ export const runOmr = async (
       return ctx.executeBangLine(trimmed);
     }
     if (!trimmed.startsWith("/")) {
-      const promptText = trimmed || "Bu görseli incele ve analiz et.";
+      const promptText = trimmed || (opts.json ? "Bu görseli incele ve analiz et." : i18n.t("launch.imagePrompt"));
       const userBadge = hasImages
         ? `${promptText} [📎 ×${images!.length}]`
         : promptText;
@@ -189,15 +193,14 @@ export const runOmr = async (
         after?.();
       });
   };
-
   const onUnhandledRejection = (reason: unknown): void => {
     output.fail(
-      `unhandled error: ${reason instanceof Error ? reason.message : String(reason)}`,
+      i18n.t("launch.unhandled", { detail: reason instanceof Error ? reason.message : String(reason) }),
     );
   };
   const onUncaughtException = (error: Error): void => {
     void (ctx?.shutdown("crashed") ?? Promise.resolve()).finally(() => {
-      process.stderr.write(`omr crashed: ${error.stack ?? error.message}\n`);
+      process.stderr.write(i18n.t("launch.crashed", { detail: error.stack ?? error.message }));
       process.exit(1);
     });
   };
@@ -223,7 +226,6 @@ export const runOmr = async (
     process.off("SIGTERM", onSigterm);
     process.off("SIGHUP", onSighup);
   };
-
   const resumeLine = opts.resume ? `/resume ${opts.resume}` : null;
   if (!uiEnabled) await initialize();
   const runBatch = async (work: () => Promise<void>): Promise<number> => {
@@ -258,10 +260,10 @@ export const runOmr = async (
       }
     });
   }
-
   if (uiEnabled) {
     const { TerminalUi: TerminalUiImpl } = await import("./tui.js");
     const ui = new TerminalUiImpl({
+      i18n,
       cwd,
       commands: [],
       providers: () => ctx?.modelController.providers ?? [],
@@ -293,11 +295,11 @@ export const runOmr = async (
         void ctx?.modelController
           .applyModelSelection(providerId, nextModel, saveDefault, effort)
           .then(({ savedPath }) => {
-            const effTag = effort !== "auto" ? ` · thinking **${effort}**` : "";
+            const effTag = effort !== "auto" ? i18n.t("launch.thinkingTag", { effort }) : "";
             ui.addSystem(
               savedPath
-                ? `Active model → **${providerId}:${nextModel}**${effTag} *(saved default in \`${savedPath}\`)*`
-                : `Active model → **${providerId}:${nextModel}**${effTag}`,
+                ? i18n.t("launch.modelSaved", { provider: providerId, model: nextModel, effort: effTag, path: savedPath })
+                : i18n.t("launch.activeModel", { provider: providerId, model: nextModel, effort: effTag }),
             );
           })
           .catch((error: unknown) => {
@@ -317,8 +319,8 @@ export const runOmr = async (
           if (!savedPath) ctx.modelController.rememberEffort(effort);
           ui.addSystem(
             savedPath
-              ? `Thinking effort → **${effort}** *(saved default in \`${savedPath}\`)*`
-              : `Thinking effort → **${effort}**`,
+              ? i18n.t("launch.effortSaved", { effort, path: savedPath })
+              : i18n.t("launch.effort", { effort }),
           );
         } catch (error) {
           ui.showOutput(
@@ -334,10 +336,10 @@ export const runOmr = async (
             ctx.modelController.applyCompactionModelSelection(spec, saveDefault);
           const primaryTag = `${ctx.modelController.modelInfo?.config.providerId ? `${ctx.modelController.modelInfo.config.providerId}:` : ""}${ctx.modelId}`;
           const targetDesc = resolvedSpec
-            ? `**${resolvedSpec}** *(active investigation continues on \`${primaryTag}\`)*`
-            : `**active** (\`${primaryTag}\`)`;
+            ? i18n.t("launch.compactionUsing", { model: resolvedSpec, primary: primaryTag })
+            : i18n.t("launch.compactionActive", { model: primaryTag });
           ui.addSystem(
-            `Compaction AI model → ${targetDesc}${savedPath ? ` *(saved default in \`${savedPath}\`)*` : ""}`,
+            i18n.t("launch.compactionModel", { model: targetDesc, saved: savedPath ? i18n.t("launch.savedTag", { path: savedPath }) : "" }),
           );
         } catch (error) {
           ui.showOutput(
@@ -351,7 +353,7 @@ export const runOmr = async (
       },
     });
     output.setUi(ui);
-    ui.setBusy("initializing session");
+    ui.setBusy(i18n.t("launch.initializing"));
     // `--resume` replaces this throwaway session's runtime, so connecting REA for it first would boot a
     // second REA process (and make `/resume` wait for the first one). Connect after the resume instead.
     if (resumeLine) {
@@ -364,14 +366,13 @@ export const runOmr = async (
       output.fail(error instanceof Error ? error.message : String(error));
     });
     void initialization.then(() => import("./setup.js")).then(({ announceRelease }) =>
-      announceRelease(ctx.env, (notice) => ui.addSystem(notice)),
+      announceRelease(ctx.env, (notice) => ui.addSystem(notice, true), i18n),
     ).catch(() => {});
     if (!resumeLine) {
       void initialization.then(() => ctx.ensureConnected()).catch(() => {});
     }
     return new Promise<number>(() => {});
   }
-
   const repl = createInterface({
     input: process.stdin,
     output: process.stdout,

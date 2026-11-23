@@ -639,11 +639,15 @@ export const saveModelRuntimeSettings = (
     readonly budgetTokens?: number | null | undefined;
     readonly pingIntervalMs?: number | undefined;
     readonly maxNetworkWaitMs?: number | undefined;
+    readonly language?: "en" | "tr";
   },
   env: NodeJS.ProcessEnv = process.env,
 ): { path: string; backupPath: string | null } => {
   const path = modelConfigPath(env);
-  const existing = readStoredModelConfig(env) ?? {};
+  const existing = readStoredModelConfig(env);
+  if (patch.language && existing === null && existsSync(path)) {
+    throw new Error("Unable to read the existing model configuration");
+  }
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
 
   let backupPath: string | null = null;
@@ -653,6 +657,7 @@ export const saveModelRuntimeSettings = (
   }
 
   const next: Record<string, unknown> = { ...existing };
+  if (patch.language) next["language"] = patch.language;
   if (patch.fallbackModels !== undefined) {
     if (patch.fallbackModels.length > 0) {
       next["fallback_models"] = [...patch.fallbackModels];

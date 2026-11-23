@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { parseLanguage } from "../../i18n/index.js";
 import { rankCatalogTools } from "../../broker.js";
 import { helpText } from "../../commands.js";
 import { formatTokenCountShort } from "../../compaction.js";
@@ -49,16 +50,41 @@ import type { CommandRegistry } from "../commandRegistry.js";
 import { errorMessageOf, splitShellTokens } from "../utils.js";
 
 export const registerSystemHandlers = (registry: CommandRegistry): void => {
+  registry.register("lang", async (ctx, rest) => {
+    const i18n = ctx.output.i18n;
+    const args = rest ? rest.split(/\s+/) : [];
+    const save = args.includes("--save");
+    const codes = args.filter((arg) => arg !== "--save");
+    const language = codes.length === 1 ? parseLanguage(codes[0]) : codes.length === 0 ? i18n.language : undefined;
+    if (!language || args.length !== codes.length + Number(save)) {
+      ctx.output.fail(i18n.t("language.usage"));
+      return;
+    }
+    await i18n.switchTo(language);
+    ctx.output.ui?.setCommands(ctx.allCommands());
+    let saved: string | null = null;
+    if (save) {
+      try {
+        saved = saveModelRuntimeSettings({ language }, ctx.env).path;
+      } catch (error) {
+        ctx.output.fail(i18n.t("language.saveFailed", { detail: errorMessageOf(error) }));
+        return;
+      }
+    }
+    const name = i18n.t(i18n.language === "en" ? "language.english" : "language.turkish");
+    const message = i18n.t("language.current", { language: i18n.language, name });
+    ctx.output.commandResult("lang", { language: i18n.language, saved }, saved ? `${message}\n${i18n.t("language.saved", { path: saved })}` : message);
+  });
   registry.register("changelog", async (ctx, rest) => {
-    const { changelogText, changelogError, noChangelogSection } = await import("../../changelog.js");
+    const { changelogText, changelogError, noChangelogSection, localizeChangelogHeadings } = await import("../../changelog.js");
     const selection = rest || VERSION;
     try {
       const notes = await changelogText(selection);
-      if (!notes) ctx.output.fail(noChangelogSection(selection));
-      else if (ctx.output.ui) ctx.output.ui.showOutput("/changelog", notes, { expanded: true });
+      if (!notes) ctx.output.fail(noChangelogSection(ctx.output.i18n, selection));
+      else if (ctx.output.ui) ctx.output.ui.showOutput("/changelog", localizeChangelogHeadings(notes, ctx.output.i18n), { expanded: true });
       else ctx.output.commandResult("changelog", { selection, markdown: notes }, notes);
     } catch (error) {
-      ctx.output.fail(changelogError(error));
+      ctx.output.fail(changelogError(ctx.output.i18n, error));
     }
   });
   registry.register("find", async (ctx, rest) => {
@@ -80,7 +106,7 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
         path.toLowerCase().endsWith(".apk");
     }
     if (!path) {
-      ctx.output.fail("no target open; use /open <path>");
+      ctx.output.fail(ctx.output.i18n.t("commandResult.targetRequired"));
       return;
     }
     if (isApk) {
@@ -95,7 +121,7 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
       ctx.output.commandResult(
         "find",
         result.payload,
-        renderClassMatches(result.payload),
+        renderClassMatches(result.payload, ctx.output.i18n),
       );
       await ctx.syncLocalStatus();
       return;
@@ -116,11 +142,11 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
       "strings",
       strings.problem
         ? `  ${strings.problem}`
-        : renderStringMatches(strings.payload),
+        : renderStringMatches(strings.payload, ctx.output.i18n),
       "procedures",
       procedures.problem
         ? `  ${procedures.problem}`
-        : renderStringMatches(procedures.payload),
+        : renderStringMatches(procedures.payload, ctx.output.i18n),
     ];
     ctx.output.commandResult(
       "find",
@@ -133,9 +159,9 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
   registry.register("tools", async (ctx, rest) => {
     const trimmed = rest.trim();
     if (trimmed === "reload") {
-      if (!ctx.rea?.refreshTools) { ctx.output.fail("This backend does not expose catalog refresh"); return; }
+      if (!ctx.rea?.refreshTools) { ctx.output.fail(ctx.output.i18n.t("commandResult.refreshUnsupported")); return; }
       await ctx.rea.refreshTools();
-      ctx.output.commandResult("tools", { revision: ctx.rea.catalogRevision, total: ctx.rea.tools().length }, `refreshed ${ctx.rea.tools().length} REA tools`);
+      ctx.output.commandResult("tools", { revision: ctx.rea.catalogRevision, total: ctx.rea.tools().length }, ctx.output.i18n.t("commandResult.toolsRefreshed", { count: ctx.rea.tools().length }));
       return;
     }
     const allTools = ctx.rea?.tools() ?? [];
@@ -143,7 +169,7 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
       const name = trimmed.slice("schema:".length).trim();
       const tool = ctx.rea?.find(name);
       if (!tool) {
-        ctx.output.fail(`no REA tool named "${name}"`);
+        ctx.output.fail(ctx.output.i18n.t("commandResult.toolMissing", { name }));
         return;
       }
       ctx.output.commandResult(
@@ -187,12 +213,12 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
         const candidate: unknown = JSON.parse(rawJson);
         const rec = asRecord(candidate);
         if (!rec) {
-          ctx.output.fail("/call arguments must be a JSON object");
+          ctx.output.fail(ctx.output.i18n.t("commandResult.callObject"));
           return;
         }
         parsedArgs = rec;
       } catch (error) {
-        ctx.output.fail(`invalid JSON arguments: ${errorMessageOf(error)}`);
+        ctx.output.fail(ctx.output.i18n.t("commandResult.invalidJson", { detail: errorMessageOf(error) }));
         return;
       }
     }
@@ -236,7 +262,7 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
       ctx.output.commandResult(
         "prompts",
         { prompts },
-        `${prompts.length} guided REA prompts:\n${lines.join("\n")}`,
+        ctx.output.i18n.t("commandResult.guidedPrompts", { count: prompts.length, lines: lines.join("\n") }),
       );
       return;
     }
@@ -274,14 +300,14 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
       ctx.output.commandResult(
         "profile",
         { active: null },
-        "cleared active analyst profile",
+        ctx.output.i18n.t("commandResult.profileCleared"),
       );
       return;
     }
     const found = findProfile(arg);
     if (!found) {
       ctx.output.fail(
-        `unknown profile "${rest.trim()}". Available profiles:\n${renderProfileList(ctx.activeProfile?.id ?? null)}`,
+        ctx.output.i18n.t("commandResult.unknownProfile", { name: rest.trim(), profiles: renderProfileList(ctx.activeProfile?.id ?? null) }),
       );
       return;
     }
@@ -308,7 +334,7 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
       ctx.output.commandResult(
         "commands",
         { commands: [] },
-        "no custom markdown slash commands found.\nCreate `.omr/commands/<name>.md` or run `/save --as-command <name> <prompt>` to add one.",
+        ctx.output.i18n.t("commandResult.noCustom"),
       );
       return;
     }
@@ -358,7 +384,7 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
       ctx.output.commandResult(
         "jb",
         cleared,
-        `cleared custom operator directive in ${cleared.agentsPath}${cleared.backupPath ? ` (backup: ${cleared.backupPath})` : ""}`,
+        ctx.output.i18n.t("commandResult.directiveCleared", { path: cleared.agentsPath, backup: cleared.backupPath ? ` (backup: ${cleared.backupPath})` : "" }),
       );
       return;
     }
@@ -428,7 +454,7 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
     }
     const resolved = resolveTargetPath(arg, ctx.cwd);
     if (!resolved) {
-      ctx.output.fail("usage: /agents.md [path|show|reload|on|off]");
+      ctx.output.fail(ctx.output.i18n.t("common.usage", { command: "/agents.md [path|show|reload|on|off]" }));
       return;
     }
     if (resolved === projectPath) {
@@ -438,7 +464,7 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
     const adopted = readInstructionFile(resolved);
     if (!adopted) {
       ctx.output.fail(
-        `cannot read instruction file ${resolved} (missing, not a regular file, or empty)`,
+        ctx.output.i18n.t("commandResult.badInstructions", { path: resolved }),
       );
       return;
     }
@@ -465,6 +491,7 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
   });
 
   registry.register("doctor", async (ctx) => {
+    const { t } = ctx.output.i18n;
     const [result, browserSnap] = await Promise.all([
       ctx.reaCall("binary_session", { detail: "complete" }),
       ctx.browserManager.status(),
@@ -478,20 +505,20 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
       .map((b) => b.id)
       .join(", ");
     const camoLabel = browserSnap.camofox.reachable
-      ? `camofox online (${browserSnap.camofox.baseUrl})`
-      : `camofox offline (${browserSnap.camofox.containerState})`;
+      ? t("doctor.camoOnline", { url: browserSnap.camofox.baseUrl })
+      : t("doctor.camoOffline", { state: browserSnap.camofox.containerState });
     const torLabel = browserSnap.tor.available
-      ? `tor reachable (${browserSnap.tor.proxyUrl})`
-      : "tor standby";
+      ? t("doctor.torOnline", { url: browserSnap.tor.proxyUrl })
+      : t("doctor.torStandby");
     const modelInfo = ctx.modelController.modelInfo;
     const modelError = ctx.modelController.modelError;
     const lines = [
-      `omr ${VERSION} · rea mcp (${ctx.rea?.tools().length ?? 0} tools + ${ctx.browserManager.tools().length} browser tools)`,
-      renderProviders(result.payload),
-      `browser ${camoLabel} · local [${installedBrowsers || "none"}] · ${torLabel}`,
-      `env     ${ctx.sources.length > 0 ? ctx.sources.join(", ") : "(shell environment only)"}`,
-      `model   ${ctx.modelId}${modelInfo ? ` · ${modelInfo.config.baseUrl} · key ${modelInfo.keySource}` : ""}`,
-      `config  ${modelInfo?.file ?? modelConfigPath(ctx.env)}${modelError ? ` (${modelError})` : ""}`,
+      `omr ${VERSION} · ${t("doctor.backend", { tools: ctx.rea?.tools().length ?? 0, browserTools: ctx.browserManager.tools().length })}`,
+      renderProviders(result.payload, ctx.output.i18n),
+      `${t("doctor.browser")} ${camoLabel} · ${t("doctor.local")} [${installedBrowsers || t("hud.none")}] · ${torLabel}`,
+      `${t("status.environment")}  ${ctx.sources.length > 0 ? ctx.sources.join(", ") : t("doctor.shellOnly")}`,
+      `${t("hud.model")}  ${ctx.opts.noModel ? t("status.noModel") : ctx.modelId}${modelInfo ? ` · ${modelInfo.config.baseUrl} · ${t("doctor.key")} ${modelInfo.keySource}` : ""}`,
+      `${t("doctor.config")}  ${modelInfo?.file ?? modelConfigPath(ctx.env)}${modelError ? ` (${modelError})` : ""}`,
     ];
     ctx.output.commandResult("doctor", result.payload, lines.join("\n"));
   });
@@ -505,7 +532,7 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
     if (rest) {
       if (ctx.opts.noModel) {
         ctx.output.fail(
-          "model switching is disabled when launched with --no-model",
+          ctx.output.i18n.t("commandResult.modelDisabled"),
         );
         return;
       }
@@ -522,7 +549,7 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
             mc.openInteractiveModelPicker(activeProv?.id ?? null);
             if (activeProv) {
               ctx.output.ui.updateModelPicker({
-                notice: `Fetched ${activeProv.models.length} live models from ${activeProv.name} (${activeProv.baseUrl})`,
+                notice: ctx.output.i18n.t("commandResult.modelFetched", { count: activeProv.models.length, provider: activeProv.name, url: activeProv.baseUrl }),
               });
             }
             return;
@@ -640,7 +667,7 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
               models_fetched: configured.provider.models.length,
               saved_path: configured.savedPath,
             },
-            `configured endpoint ${configured.provider.baseUrl} (${configured.provider.models.length} live models fetched) · active model custom:${configured.selectedModel} (saved → ${configured.savedPath})`,
+            ctx.output.i18n.t("commandResult.customEndpoint", { url: configured.provider.baseUrl, count: configured.provider.models.length, model: configured.selectedModel, path: configured.savedPath }),
           );
           return;
         }
@@ -654,7 +681,7 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
         const spec = filtered.join(" ").trim();
         if (!spec) {
           if (ctx.output.ui) mc.openInteractiveModelPicker(null);
-          else ctx.output.fail("usage: /model [--save] [provider:]<model>");
+          else ctx.output.fail(ctx.output.i18n.t("common.usage", { command: "/model [--save] [provider:]<model>" }));
           return;
         }
         const parsed = splitProviderModelSpec(spec, mc.providers);
@@ -676,7 +703,7 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
             base_url: mc.modelInfo?.config.baseUrl ?? null,
             saved_path: savedPath,
           },
-          `switched active model to ${provTag}${ctx.modelId}${savedSuffix}`,
+          ctx.output.i18n.t("commandResult.modelSwitched", { provider: provTag, model: ctx.modelId, saved: savedSuffix }),
         );
       } catch (error) {
         ctx.output.fail(errorMessageOf(error));
@@ -716,6 +743,7 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
   });
 
   registry.register("effort", async (ctx, rest) => {
+    const { t } = ctx.output.i18n;
     const mc = ctx.modelController;
     if (!rest && ctx.output.ui) {
       mc.openInteractiveEffortPicker();
@@ -724,8 +752,8 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
     if (!rest) {
       const current = mc.modelInfo?.config.reasoningEffort ?? "auto";
       const lines: string[] = [
-        `thinking  ${current} · model ${ctx.modelId}`,
-        "levels    auto · off · minimal · low · medium · high · xhigh",
+        `${t("hud.thinking")}  ${t("commandResult.effortModel", { effort: current, model: ctx.modelId })}`,
+        `${t("commandResult.modelLevels")}  auto · off · minimal · low · medium · high · xhigh`,
       ];
       for (const lvl of REASONING_EFFORT_LEVELS) {
         const marker = lvl.id === current ? "▸" : " ";
@@ -733,7 +761,7 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
           ? ` (${lvl.anthropicBudget} tok)`
           : "";
         lines.push(
-          `  ${marker} ${lvl.id.padEnd(8)} ${lvl.description}${budget}`,
+          `  ${marker} ${lvl.id.padEnd(8)} ${t(`effort.${lvl.id}`)}${budget}`,
         );
       }
       ctx.output.commandResult(
@@ -782,7 +810,7 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
           model: ctx.modelId,
           saved_path: savedPath,
         },
-        `thinking effort: ${parsedEffort}${savedSuffix}`,
+        ctx.output.i18n.t("commandResult.effort", { level: parsedEffort, saved: savedSuffix }),
       );
     } catch (error) {
       ctx.output.fail(errorMessageOf(error));
@@ -888,8 +916,8 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
           saved_path: savedPath,
         },
         specs.length > 0
-          ? `failover chain: ${primaryLabel} → ${specs.join(" → ")}${savedNote}`
-          : `cleared automatic provider failover chain${savedNote}`,
+          ? ctx.output.i18n.t("commandResult.failover", { primary: primaryLabel, fallbacks: specs.join(" → "), saved: savedNote })
+          : ctx.output.i18n.t("commandResult.failoverCleared", { saved: savedNote }),
       );
     } catch (error) {
       ctx.output.fail(errorMessageOf(error));
@@ -900,7 +928,7 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
     await ctx.runtime.usage.initialize();
     if (rest.trim().toLowerCase() === "reset" || rest.trim().toLowerCase().startsWith("reset ")) {
       await ctx.runtime.usage.reset(rest.trim().slice(5).trim() || "Operator explicitly requested /budget reset");
-      ctx.output.commandResult("budget", {...ctx.runtime.usage.snapshot()}, "session usage baseline reset; prior usage remains in the execution trace");
+      ctx.output.commandResult("budget", {...ctx.runtime.usage.snapshot()}, ctx.output.i18n.t("commandResult.usageReset"));
       return;
     }
     const mc = ctx.modelController;
@@ -952,7 +980,7 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
       lower === "0";
     const parsed = isClear ? null : parseTokenBudgetSpec(rawSpec);
     if (!isClear && parsed === null) {
-      ctx.output.fail("usage: /budget [<tokens>|500k|1m|off] [--save]");
+      ctx.output.fail(ctx.output.i18n.t("common.usage", { command: "/budget [<tokens>|500k|1m|off] [--save]" }));
       return;
     }
     await ctx.runtime.usage.setBudget(parsed);
@@ -993,8 +1021,8 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
         saved_path: savedPath,
       },
       parsed
-        ? `session token budget cap → ${parsed.toLocaleString()} (${formatTokenCountShort(parsed)}) tokens${savedNote}`
-        : `session token budget cap → unlimited${savedNote}`,
+        ? ctx.output.i18n.t("commandResult.budgetCap", { count: parsed.toLocaleString(), short: formatTokenCountShort(parsed), saved: savedNote })
+        : ctx.output.i18n.t("commandResult.budgetUnlimited", { saved: savedNote }),
     );
   });
 
@@ -1016,7 +1044,7 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
       }
       const ms = Number.parseInt(valStr, 10);
       if (!Number.isFinite(ms) || ms < 250) {
-        ctx.output.fail(`usage: /net ${sub} <ms> [--save] (minimum 250ms)`);
+        ctx.output.fail(ctx.output.i18n.t("common.usage", { command: `/net ${sub} <ms> [--save] (minimum 250ms)` }));
         return;
       }
       if (mc.modelInfo) {
@@ -1046,7 +1074,7 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
           value_ms: ms,
           saved_path: savedPath,
         },
-        `net-guard ${sub === "interval" ? "pingIntervalMs" : "maxNetworkWaitMs"} → ${ms}ms${savedPath ? ` (saved → ${savedPath})` : ""}`,
+        ctx.output.i18n.t("commandResult.netConfig", { setting: sub === "interval" ? "pingIntervalMs" : "maxNetworkWaitMs", ms, saved: savedPath ? ` (saved → ${savedPath})` : "" }),
       );
       return;
     }
@@ -1127,7 +1155,7 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
       arg !== "busy" &&
       arg !== "off"
     ) {
-      ctx.output.fail("usage: /binary [on|eco|busy|off]");
+      ctx.output.fail(ctx.output.i18n.t("common.usage", { command: "/binary [on|eco|busy|off]" }));
       return;
     }
     const normalizedArg = arg === "always" ? "on" : arg;
@@ -1139,7 +1167,7 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
     ctx.output.commandResult(
       "binary",
       { mode },
-      `binary bitstream mode: ${mode}`,
+      ctx.output.i18n.t("commandResult.binaryMode", { mode }),
     );
   });
 
@@ -1218,7 +1246,7 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
       ctx.output.commandResult(
         "image",
         { cleared: removed },
-        `cleared ${removed} staged image attachment(s)`,
+        ctx.output.i18n.t("commandResult.imagesCleared", { count: removed }),
       );
       return;
     }
@@ -1354,7 +1382,7 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
     }
     const inlinePrompt = tokens.slice(cursor).join(" ").trim();
 
-    ctx.output.ui?.setBusy(`capturing ${mode} screenshot`);
+    ctx.output.ui?.setBusy(ctx.output.i18n.t("commandResult.screenshot", { mode }));
     let shot;
     try {
       shot = await captureScreenshot({
@@ -1424,7 +1452,7 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
     ctx.output.commandResult(
       "help",
       { commands: ctx.allCommands() },
-      helpText(ctx.customCommands),
+      helpText(ctx.customCommands, ctx.output.i18n),
     );
   });
 };

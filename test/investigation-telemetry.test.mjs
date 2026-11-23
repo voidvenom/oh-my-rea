@@ -1,3 +1,5 @@
+import { englishI18n } from "../dist/i18n/index.js";
+
 import assert from "node:assert/strict";
 import { useModelCatalogFixtures } from "./fixtures/model-catalogs.mjs";
 import { createHash } from "node:crypto";
@@ -19,6 +21,9 @@ import { TerminalUi } from "../dist/tui.js";
 import { stripAnsi } from "../dist/ansi.js";
 import { createReadOnlySubagentBroker } from "../dist/subagent.js";
 import { InvestigationState } from "../dist/investigation.js";
+
+const englishUi = await englishI18n();
+
 
 useModelCatalogFixtures();
 
@@ -100,7 +105,7 @@ describe("truthful active-ledger telemetry and autonomous investigation",()=>{
     const root=await mkdtemp(join(tmpdir(),"omr-gap-fork-"));let ctx;try{const value=await context(root);ctx=value.ctx;await ctx.ensureConnected();await ctx.rea.call("analyze_javascript_application",{input_path:root});const gap=ctx.runtime.investigation.read().providerGaps[0];await ctx.runtime.investigation.reviewGap(gap.id,"not_material","The goal only asks for inert static structure, not runtime values.");const branch=await forkSession(ctx.session,[],null,"fixture",{rootDir:join(root,"branches")});const restored=new InvestigationState({directory:branch.dir,sessionId:branch.id,cwd:root,signal:new AbortController().signal,rea:()=>null,target:()=>null,selectTarget:async()=>{}});await restored.initialize();assert.equal(restored.gap(gap.id).review.decision,"not_material");assert.equal(restored.read().lastAnalysis.historical,true);await restored.reviewGap(gap.id,"unavailable","Different session currently has no authenticated native source.");assert.equal(ctx.runtime.investigation.gap(gap.id).review.decision,"not_material");await restored.close();const child=createReadOnlySubagentBroker(ctx.broker);assert.equal((await child.dispatch("omr_investigation",{action:"status"})).isError,false);assert.equal((await child.dispatch("omr_investigation",{action:"select",path:root})).isError,true);assert.equal((await child.dispatch("omr_investigation",{action:"record_gap",gap_id:gap.id})).isError,true);}finally{await ctx?.shutdown("complete");await rm(root,{recursive:true,force:true});}
   });
   it("renders unknown/stale values, event units, usage and the fallback window honestly",()=>{
-    const ui=new TerminalUi({commands:[],onSubmit:()=>{},onInterrupt:()=>{},onExit:()=>{}});ui.setStatus({evidence:null,unknowns:null,unknownTotal:null,unknownResolved:null,ledgerHealth:"unavailable",journal:1,journalHealth:"live",tokens:900,estimatedTokens:300,context:{tokens:3100,window:32768,percent:9.5,source:"estimate",windowSource:"conservative"},analysisScope:{kind:"artifact",value:"/fixture/app",operation:"analyze_javascript_application",observedAt:"",historical:false},nativeBinding:"closed"});let text=ui.renderHudSidebar(70,60).map(stripAnsi).join("\n");assert.match(text,/\? ev · \? unk/);assert.match(text,/#1 events/);assert.match(text,/900 tok \(300 est\)/);assert.match(text,/~9\.5%/);assert.match(text,/32\.8k safe/);assert.match(text,/app \(analysis\)/);assert.match(text,/AGENT CALLS/);ui.setStatus({evidence:3,unknowns:1,ledgerHealth:"stale"});text=stripAnsi(ui.renderStatusBar(240));assert.match(text,/ev:~3/);assert.match(text,/unk:~1/);
+    const ui=new TerminalUi({ i18n: englishUi,commands:[],onSubmit:()=>{},onInterrupt:()=>{},onExit:()=>{}});ui.setStatus({evidence:null,unknowns:null,unknownTotal:null,unknownResolved:null,ledgerHealth:"unavailable",journal:1,journalHealth:"live",tokens:900,estimatedTokens:300,context:{tokens:3100,window:32768,percent:9.5,source:"estimate",windowSource:"conservative"},analysisScope:{kind:"artifact",value:"/fixture/app",operation:"analyze_javascript_application",observedAt:"",historical:false},nativeBinding:"closed"});let text=ui.renderHudSidebar(70,60).map(stripAnsi).join("\n");assert.match(text,/\? ev · \? unk/);assert.match(text,/#1 events/);assert.match(text,/900 tok \(300 est\)/);assert.match(text,/~9\.5%/);assert.match(text,/32\.8k safe/);assert.match(text,/app \(analysis\)/);assert.match(text,/AGENT CALLS/);ui.setStatus({evidence:3,unknowns:1,ledgerHealth:"stale"});text=stripAnsi(ui.renderStatusBar(240));assert.match(text,/ev:~3/);assert.match(text,/unk:~1/);
   });
   it("exposes dashboard native counts separately from historical journal observations",async()=>{
     const root=await mkdtemp(join(tmpdir(),"omr-dashboard-ledger-"));let ctx;try{const value=await context(root);ctx=value.ctx;await ctx.ensureConnected();await writeFile(value.session.journalPath,JSON.stringify({type:"tool.result",seq:1,ok:true,evidence_ids:[`ev_${"a".repeat(64)}`]})+"\n");const snapshot=await readSnapshot(value.session,null,ctx.journalTailer,()=>ctx.runtime.investigation.read());assert.equal(snapshot.counts_source,"journal-observations");assert.equal(snapshot.counts.evidence,1);assert.equal(snapshot.investigation.ledger.evidence,0);}finally{await ctx?.shutdown("complete");await rm(root,{recursive:true,force:true});}

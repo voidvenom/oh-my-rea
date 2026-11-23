@@ -73,6 +73,16 @@ describe("Single-source command registry, handler binding, and zero-drift invari
     }
   });
 
+  it("documents the changelog and language commands in the reference", async () => {
+    const reference = await readFile(join(repoRoot, "docs", "REFERENCE.md"), "utf8");
+    for (const name of ["changelog", "lang"]) {
+      const command = COMMANDS.find((entry) => entry.name === name);
+      assert.ok(command);
+      assert.ok(reference.includes(command.usage), command.usage);
+      for (const alias of command.aliases ?? []) assert.ok(reference.includes(`/${alias}`));
+    }
+  });
+
   it("keeps src/runtime.ts as a lean composition root (<= 400 lines) and keeps profiles/subagents free of refusal language", async () => {
     const runtimeSrc = await readFile(
       join(repoRoot, "src", "runtime.ts"),

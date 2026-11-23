@@ -375,7 +375,7 @@ export class OmrContext {
       this.output.commandResult(
         "bang",
         { cleared: count },
-        `cleared ${count} staged command output block(s)`,
+        this.output.i18n.t("runtime.shellCleared", { count }),
       );
       return true;
     }
@@ -384,7 +384,7 @@ export class OmrContext {
         this.output.commandResult(
           "bang",
           { staged: [] },
-          "no staged command output · use `!<cmd>` for local shell or `!!<cmd>` to stage output into the next agent turn",
+          this.output.i18n.t("runtime.shellEmpty"),
         );
         return true;
       }
@@ -403,7 +403,7 @@ export class OmrContext {
     }
 
     this.output.ui?.addUser(rawLine);
-    this.output.ui?.setBusy(`running $ ${bang.command}`);
+    this.output.ui?.setBusy(this.output.i18n.t("runtime.shellRunning", { command: bang.command }));
     const abort = new AbortController();
     this.activeAbort = abort;
     try {
@@ -453,6 +453,7 @@ export class OmrContext {
 
   buildDynamicSystemPrompt(): string {
     return systemPrompt({
+      answerLanguage: this.output.i18n.answerLanguage,
       target: this.currentTarget,
       targetOpened: this.targetOpened,
       targetFormat: this.currentMagic?.label ?? null,
@@ -555,7 +556,7 @@ export class OmrContext {
   }
 
   async switchSession(nextSession: SessionInfo, origin?: {source: SessionInfo; kind: EvidenceOrigin["kind"]}): Promise<void> {
-    if (this.activeAbort) throw new Error("Finish or cancel the active turn before switching sessions");
+    if (this.activeAbort) throw new Error(this.output.i18n.t("runtime.switchBusy"));
     if (this.session.dir === nextSession.dir) return;
     const previous = this.runtime;
     previous.lifecycle.abort();
@@ -855,9 +856,9 @@ export class OmrContext {
       await runtime.investigation.initialize();
       await runtime.browser.context.initialize();
       this.booting = true;
-      this.output.ui?.setBusy("starting rea");
+      this.output.ui?.setBusy(this.output.i18n.t("runtime.startingRea"));
       if (!this.output.ui && !this.opts.json) {
-        this.output.write("starting rea…");
+        this.output.write(this.output.i18n.t("runtime.startingReaNotice"));
       }
       const connection = await this.connectReaFn(
         this.session.dir,
@@ -877,7 +878,7 @@ export class OmrContext {
             runtime.investigation.disconnect();
             void this.syncLocalStatus().catch(() => {});
             this.output.systemNotice(
-              `${detail}\nREA will restart automatically before the next step or command.`,
+              this.output.i18n.t("runtime.reaReconnect", { detail }),
             );
           },
         },
@@ -960,7 +961,7 @@ export class OmrContext {
       this.booting = false;
       this.output.ui?.setBusy(null);
       const message = errorMessageOf(error);
-      this.output.fail(`REA start failed: ${message}. Run \`rea doctor\`.`);
+      this.output.fail(this.output.i18n.t("runtime.reaFailed", { detail: message }));
       throw error;
     });
     return this.readyPromise;
@@ -975,9 +976,9 @@ export class OmrContext {
     if (this.openingPromise) return this.openingPromise;
     this.openingPromise = (async () => {
       this.opening = true;
-      this.output.ui?.setBusy("opening target");
+      this.output.ui?.setBusy(this.output.i18n.t("runtime.openingTarget"));
       if (!this.output.ui && !this.opts.json) {
-        this.output.write("opening target…");
+        this.output.write(this.output.i18n.t("runtime.openingTargetNotice"));
       }
       try {
         const opened = await connection.call("open_binary", {
@@ -988,14 +989,14 @@ export class OmrContext {
           : null;
         if (problem) {
           this.targetOpenFailedPath = this.currentTarget;
-          this.output.fail(`cannot open ${this.currentTarget}: ${problem}`);
+          this.output.fail(this.output.i18n.t("runtime.targetFailed", { target: this.currentTarget, detail: problem }));
         } else {
           this.targetOpened = true;
           this.targetOpenFailedPath = null;
           if (this.opts.json) {
             this.output.emit("target.open", { payload: opened.payload });
           } else if (!this.output.ui) {
-            this.output.write(renderOpen(opened.payload));
+            this.output.write(renderOpen(opened.payload, this.output.i18n));
           }
         }
       } finally {
@@ -1112,13 +1113,13 @@ export class OmrContext {
       else if (this.output.ui) {
         this.output.ui.showOutput(
           "dashboard",
-          `Live session dashboard running at:\n  ${url}`,
+          this.output.i18n.t("runtime.dashboardStarted", { url }),
         );
       } else {
-        this.output.write(`dashboard ${url}`);
+        this.output.write(this.output.i18n.t("runtime.dashboard", { url }));
       }
     } catch (error) {
-      this.output.fail(`dashboard failed: ${errorMessageOf(error)}`);
+      this.output.fail(this.output.i18n.t("runtime.dashboardFailed", { detail: errorMessageOf(error) }));
     }
   }
 
@@ -1137,7 +1138,7 @@ export class OmrContext {
       session_dir: this.session.dir,
     });
     if (!this.output.ui && !this.opts.json) {
-      this.output.write(`session ${this.session.dir}`);
+      this.output.write(this.output.i18n.t("runtime.session", { path: this.session.dir }));
     }
   }
 
@@ -1172,9 +1173,9 @@ export class OmrContext {
     ];
     if (mentions.images.length > 0) {
       const labels = mentions.images.map((img) => img.label).join(", ");
-      if (ui) ui.addSystem(`📎 @mention ile görsel eklendi: ${labels}`);
+      if (ui) ui.addSystem(this.output.i18n.t("runtime.mentionImage", { labels }));
       else if (!this.opts.json) {
-        this.output.write(`  📎 attached image(s): ${labels}`);
+        this.output.write(this.output.i18n.t("runtime.imageAttached", { labels }));
       }
     }
     const effectiveInput = mentions.contextAppendix
@@ -1206,7 +1207,7 @@ export class OmrContext {
     let streamedAny = false;
     let activeToolLabel = "tool";
     let wasInterruptedForSteer = false;
-    ui?.setBusy("thinking");
+    ui?.setBusy(this.output.i18n.t("runtime.thinking"));
 
     try {
       try {
@@ -1218,7 +1219,7 @@ export class OmrContext {
       }
       this.ensureAgentInitialized();
       if (!this.agent) {
-        this.output.fail(`no model configured: ${this.modelController.modelError ?? "unknown error"}`);
+        this.output.fail(this.output.i18n.t("runtime.noModel", { detail: this.modelController.modelError ?? "unknown error" }));
         return;
       }
       this.lastUserPrompt = input;
@@ -1287,15 +1288,15 @@ export class OmrContext {
           onNetworkStatus: (notice) => {
             ui?.setNetworkStatus(notice);
             if (notice.state === "restored") {
-              ui?.setBusy("network restored · continuing session");
+              ui?.setBusy(this.output.i18n.t("runtime.networkBack"));
               if (!ui && !this.opts.json) {
                 this.output.writeError(
-                  `✓ network restored (${notice.target}${notice.latencyMs !== null ? ` · ${notice.latencyMs}ms` : ""}) · continuing session`,
+                  this.output.i18n.t("runtime.networkRestored", { target: notice.target, latency: notice.latencyMs !== null ? ` · ${notice.latencyMs}ms` : "" }),
                 );
               }
             } else {
               ui?.setBusy(
-                `network hold · ping #${notice.attempt} ${notice.target}`,
+                this.output.i18n.t("runtime.networkPing", { attempt: notice.attempt, target: notice.target }),
               );
               if (
                 !ui &&
@@ -1304,7 +1305,7 @@ export class OmrContext {
                 notice.state === "offline"
               ) {
                 this.output.writeError(
-                  `network offline (${notice.reason}) · pinging ${notice.target} to auto-resume…`,
+                  this.output.i18n.t("runtime.networkOffline", { reason: notice.reason, target: notice.target }),
                 );
               }
             }
@@ -1313,7 +1314,7 @@ export class OmrContext {
             }
           },
           onCompactionStart: (strategy) =>
-            ui?.setBusy(`compacting context (${strategy})`),
+            ui?.setBusy(this.output.i18n.t("runtime.compacting", { strategy })),
           onCompaction: (report) => {
             const text = describeCompaction(report);
             if (ui) ui.addSystem(text);
@@ -1348,7 +1349,7 @@ export class OmrContext {
             }
             const { displayTool, summary } = summarizeToolCall(name, args);
             activeToolLabel = displayTool;
-            ui?.setBusy(`running ${displayTool}`);
+            ui?.setBusy(this.output.i18n.t("runtime.toolRunning", { tool: displayTool }));
             ui?.toolStart(callId, name, args);
             if (!this.opts.json && !ui) {
               this.output.write(
@@ -1395,7 +1396,7 @@ export class OmrContext {
               });
             }
           },
-          onStep: (step) => ui?.setBusy(`step ${step}`),
+          onStep: (step) => ui?.setBusy(this.output.i18n.t("runtime.step", { step })),
           onUsage: (_turnUsage, totalTokens) =>
             ui?.setStatus({ tokens: totalTokens }),
         },
@@ -1411,7 +1412,7 @@ export class OmrContext {
         steps: turn.steps, tool_calls: turn.toolCalls, usage: turn.usage, duration_ms: elapsedMs,
       });
       if (turn.status !== "completed" && !turn.aborted) {
-        this.output.systemNotice(`turn ${turn.status}${turn.finishReason ? ` (${turn.finishReason})` : ""}: ${describeIncompleteTurn(turn.finishReason)}; context is kept for continuation`);
+        this.output.systemNotice(this.output.i18n.t("runtime.turnIncomplete", { status: turn.status, reason: turn.finishReason ? ` (${turn.finishReason})` : "", detail: describeIncompleteTurn(turn.finishReason) }));
       }
       const newEvidence = Math.max(0, this.evidenceSeen.size - evidenceBefore);
       wasInterruptedForSteer = this.interruptingForSteer;
@@ -1425,14 +1426,14 @@ export class OmrContext {
         }
         if (wasInterruptedForSteer) {
           ui?.addSystem(
-            `⚡ mevcut adım kesildi (${formatDurationShort(elapsedMs)}) · yeni mesaj hemen işleniyor`,
+            this.output.i18n.t("runtime.steered", { time: formatDurationShort(elapsedMs) }),
           );
         } else if (ui) {
           ui.addSystem(
-            `turn cancelled after ${formatDurationShort(elapsedMs)}`,
+            this.output.i18n.t("runtime.cancelled", { time: formatDurationShort(elapsedMs) }),
           );
         } else if (!this.opts.json) {
-          this.output.write("[turn cancelled]");
+          this.output.write(this.output.i18n.t("runtime.cancelledMarker"));
         }
         if (this.opts.json) {
           this.output.emit("turn.aborted", {
@@ -1512,11 +1513,11 @@ export class OmrContext {
       }
       if (signal.aborted) {
         this.output.recordOutcome({ status: "cancelled", finishReason: null });
-        this.output.systemNotice("turn cancelled during preparation");
+        this.output.systemNotice(this.output.i18n.t("runtime.preparationCancelled"));
         this.output.emit("turn.aborted", { label, steps: 0, tool_calls: 0 });
       } else {
-        this.output.fail(`model error: ${message}`);
-        if (this.opts.json) this.output.writeError(`model error: ${message}`);
+        this.output.fail(this.output.i18n.t("runtime.modelError", { detail: message }));
+        if (this.opts.json) this.output.writeError(this.output.i18n.t("runtime.modelError", { detail: message }));
       }
     } finally {
       this.activeAbort = null;

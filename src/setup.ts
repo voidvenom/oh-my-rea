@@ -14,7 +14,9 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { promisify } from "node:util";
+import { padEndAnsi, visibleWidth } from "./ansi.js";
 import { resolveReaEnv } from "./env.js";
+import type { I18n } from "./i18n/index.js";
 import { resolveReaLauncher } from "./reaLauncher.js";
 import { VERSION } from "./version.js";
 
@@ -211,7 +213,9 @@ const isNewer = (latest: string | undefined, installed: string | null): boolean 
  */
 const pendingRefreshes = new Map<string, Promise<UpdateCache>>();
 
-export const updateNotice = async (env: NodeJS.ProcessEnv = process.env): Promise<string | null> => {
+const english = async (): Promise<I18n> => (await import("./i18n/index.js")).englishI18n();
+
+export const updateNotice = async (env: NodeJS.ProcessEnv = process.env, language?: I18n): Promise<string | null> => {
   if (env["OMR_NO_UPDATE_CHECK"] === "1" || env["CI"]) return null;
   const cache = await readCache(env);
   const needsRegistry = !cache || Date.now() - cache.checkedAt >= CHECK_INTERVAL_MS;
@@ -232,13 +236,13 @@ export const updateNotice = async (env: NodeJS.ProcessEnv = process.env): Promis
   const outdated: string[] = [];
   if (isNewer(cache.latest[OMR_PACKAGE], VERSION)) outdated.push(`omr ${VERSION} → ${cache.latest[OMR_PACKAGE]}`);
   if (isNewer(cache.latest[REA_PACKAGE], installed)) outdated.push(`rea ${installed} → ${cache.latest[REA_PACKAGE]}`);
-  return outdated.length ? `Update available: ${outdated.join(", ")} · /changelog · omr update` : null;
+  return outdated.length ? (language ?? await english()).t("setup.updateAvailable", { packages: outdated.join(", ") }) : null;
 };
 
-export const announceRelease = async (env: NodeJS.ProcessEnv, display: (text: string) => void): Promise<void> => {
+export const announceRelease = async (env: NodeJS.ProcessEnv, display: (text: string) => void, language: I18n): Promise<void> => {
   await Promise.all([
-    updateNotice(env).then((notice) => { if (notice) display(notice); }),
-    import("./changelog.js").then(({ whatsNew }) => whatsNew(env)).then((notes) => { if (notes) display(notes); }),
+    updateNotice(env, language).then((notice) => { if (notice) display(notice); }),
+    import("./changelog.js").then(({ whatsNew }) => whatsNew(env, VERSION, undefined, language)).then((notes) => { if (notes) display(notes); }),
   ]);
 };
 
@@ -251,88 +255,80 @@ const npmInstallGlobal = (spec: string): Promise<number> =>
     child.once("close", (code) => resolve(code ?? 1));
   });
 
-const permissionHint = (): string =>
-  "If npm reported EACCES, point npm at a user prefix instead of using sudo:\n" +
-  "  npm config set prefix ~/.local   # then make sure ~/.local/bin is on PATH";
-
 const nodeVersion = (): Version => parseVersion(process.version) ?? [0, 0, 0];
 
 const confirm = async (question: string): Promise<boolean> => {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    const answer = (await rl.question(question)).trim().toLowerCase();
+    const answer = (await rl.question(question)).trim().toLocaleLowerCase("tr");
     return answer === "" || answer === "y" || answer === "yes" || answer === "e" || answer === "evet";
   } finally {
     rl.close();
   }
 };
 
-const BANNER = [
-  "omr works together with REA (Reverse Engineer Anything).",
-  "REA is not installed yet. It will be installed globally from the official npm",
-  `package "${REA_PACKAGE}" (github.com/morluto/rea) with:`,
-  "",
-  `    npm install --global ${REA_PACKAGE}`,
-  "",
-  "Both omr and REA will then be kept up to date with `omr update`.",
-];
-
 const printBox = (lines: readonly string[]): void => {
-  const width = Math.max(...lines.map((line) => line.length));
+  const width = Math.max(...lines.map(visibleWidth));
   const bar = "─".repeat(width + 2);
-  process.stdout.write(`┌${bar}┐\n${lines.map((line) => `│ ${line.padEnd(width)} │`).join("\n")}\n└${bar}┘\n`);
+  process.stdout.write(`┌${bar}┐\n${lines.map((line) => `│ ${padEndAnsi(line, width)} │`).join("\n")}\n└${bar}┘\n`);
 };
 
 /**
  * Makes sure REA is available before omr starts. Returns an exit code to stop
  * with, or `null` to continue. Prompts only on an interactive terminal.
  */
-export const ensureRea = async (env: NodeJS.ProcessEnv = process.env): Promise<number | null> => {
+export const ensureRea = async (env: NodeJS.ProcessEnv = process.env, language = english): Promise<number | null> => {
   if (env["OMR_SKIP_SETUP"] === "1") return null;
   if (resolveReaLauncher(env) || resolveReaLauncher(resolveReaEnv(env).env)) return null;
+  const { t } = await language();
+  const error = (message: string): void => { process.stderr.write(`${t("common.error", { message })}\n`); };
 
   const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
   if (!interactive) {
-    process.stderr.write(
-      `error: REA is not installed. Run \`omr setup\` in a terminal, or: npm install --global ${REA_PACKAGE}\n`,
-    );
+    error(t("setup.missing", { package: REA_PACKAGE }));
     return 1;
   }
   if (!nodeSatisfiesRea(nodeVersion())) {
-    process.stderr.write(`error: REA requires ${NODE_REQUIREMENT}; this is ${process.version}. Upgrade Node, then run \`omr setup\`.\n`);
+    error(`${t("setup.node", { requirement: NODE_REQUIREMENT, version: process.version })} ${t("setup.upgradeNode")}`);
     return 1;
   }
-  printBox(BANNER);
-  if (!(await confirm("Install REA now? [Y/n] "))) {
-    process.stdout.write("Skipped. omr cannot run without REA; run `omr setup` when you are ready.\n");
+  printBox(t("setup.banner", { package: REA_PACKAGE }).split("\n"));
+  if (!(await confirm(t("setup.confirm")))) {
+    process.stdout.write(`${t("setup.skipped")}\n`);
     return 1;
   }
   const code = await npmInstallGlobal(REA_PACKAGE);
   if (code !== 0 || detectRea(env).state !== "ok") {
-    process.stderr.write(`error: REA installation failed (exit ${code}).\n${permissionHint()}\n`);
+    error(`${t("setup.installFailed", { code })}\n${t("setup.permission")}`);
     return 1;
   }
-  process.stdout.write("REA installed.\n\n");
+  process.stdout.write(`${t("setup.installed")}\n\n`);
   return null;
 };
 
 /** `omr setup`: verify the environment and install REA if needed. */
-export const runSetup = async (env: NodeJS.ProcessEnv = process.env): Promise<number> => {
+export const runSetup = async (env: NodeJS.ProcessEnv = process.env, language?: I18n): Promise<number> => {
+  const i18n = language ?? await english();
+  const { t } = i18n;
   process.stdout.write(`omr ${VERSION} · node ${process.version}\n`);
   if (!nodeSatisfiesRea(nodeVersion())) {
-    process.stderr.write(`error: REA requires ${NODE_REQUIREMENT}; this is ${process.version}.\n`);
+    const message = t("setup.node", { requirement: NODE_REQUIREMENT, version: process.version });
+    process.stderr.write(`${t("common.error", { message })}\n`);
     return 1;
   }
-  const stop = await ensureRea(env);
+  const stop = await ensureRea(env, async () => i18n);
   if (stop !== null) return stop;
   const rea = detectReaExact(env);
-  const where = rea.state === "ok" ? `${rea.source}${rea.version ? ` ${rea.version}` : ""}` : "missing";
+  const sources = { env: "setup.sourceEnv", checkout: "setup.sourceCheckout", path: "setup.sourcePath" } as const;
+  const where = rea.state === "ok" ? `${t(sources[rea.source])}${rea.version ? ` ${rea.version}` : ""}` : t("setup.sourceMissing");
   process.stdout.write(`REA: ${where}\n`);
   return 0;
 };
 
 /** `omr update`: bring omr and REA to the latest npm release. */
-export const runUpdate = async (env: NodeJS.ProcessEnv = process.env): Promise<number> => {
+export const runUpdate = async (env: NodeJS.ProcessEnv = process.env, language?: I18n): Promise<number> => {
+  const i18n = language ?? await english();
+  const { t } = i18n;
   const cache = await refreshCache(env, await readCache(env));
   const rea = detectReaExact(env);
   const targets: { name: string; spec: string; from: string }[] = [];
@@ -343,34 +339,36 @@ export const runUpdate = async (env: NodeJS.ProcessEnv = process.env): Promise<n
     targets.push({ name: "rea", spec: `${REA_PACKAGE}@latest`, from: rea.version ?? "?" });
   }
   if (!cache.latest[OMR_PACKAGE] && !cache.latest[REA_PACKAGE]) {
-    process.stderr.write("error: could not reach the npm registry; try again later.\n");
+    process.stderr.write(`${t("common.error", { message: t("setup.registryError") })}\n`);
     return 1;
   }
   if (targets.length === 0) {
-    process.stdout.write(`omr ${VERSION}${rea.state === "ok" && rea.version ? ` · rea ${rea.version}` : ""} — already up to date.\n`);
+    const packages = `omr ${VERSION}${rea.state === "ok" && rea.version ? ` · rea ${rea.version}` : ""}`;
+    process.stdout.write(`${t("setup.upToDate", { packages })}\n`);
     return 0;
   }
   let failed = false;
   for (const target of targets) {
-    process.stdout.write(`updating ${target.name} ${target.from} → ${target.name === "omr" ? latestOmr : latestRea}\n`);
+    process.stdout.write(`${t("setup.updating", { package: target.name, from: target.from, to: target.name === "omr" ? latestOmr : latestRea })}\n`);
     const code = await npmInstallGlobal(target.spec);
     if (code !== 0) {
       failed = true;
-      process.stderr.write(`error: ${target.name} update failed (exit ${code}).\n${permissionHint()}\n`);
+      const message = t("setup.updateFailed", { package: target.name, code });
+      process.stderr.write(`${t("common.error", { message })}\n${t("setup.permission")}\n`);
     } else if (target.name === "omr") {
-      await printInstalledReleaseNotes(env);
+      await printInstalledReleaseNotes(env, i18n);
     }
   }
   return failed ? 1 : 0;
 };
 
-const printInstalledReleaseNotes = async (env: NodeJS.ProcessEnv): Promise<void> => {
+const printInstalledReleaseNotes = async (env: NodeJS.ProcessEnv, language: I18n): Promise<void> => {
   try {
     const { stdout } = await promisify(execFile)("npm", ["root", "--global"], { encoding: "utf8" });
     const root = join(stdout.trim(), OMR_PACKAGE);
     const { version } = JSON.parse(await readFile(join(root, "package.json"), "utf8")) as { version: string };
     const { whatsNew } = await import("./changelog.js");
-    const notes = await whatsNew(env, version, join(root, "CHANGELOG.md"));
+    const notes = await whatsNew(env, version, join(root, "CHANGELOG.md"), language);
     if (notes) process.stdout.write(`${notes}\n`);
   } catch {
     // The next interactive start can still display notes from the installed package.

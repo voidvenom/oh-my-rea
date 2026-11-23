@@ -8,6 +8,7 @@ This project uses the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) f
 
 - `omr changelog [version|--all]` and a paged `/changelog` view read the packaged release history.
 - Interactive launches show a short release summary once per installed version. `omr update` shows it immediately when the newly installed package includes notes.
+- Turkish and English terminal interfaces. Select a language with `--lang`, `OMR_LANG`, or `/lang`, and use `/lang --save` to remember it.
 
 ### Changed
 
