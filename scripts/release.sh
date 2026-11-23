@@ -28,7 +28,9 @@ npm whoami >/dev/null 2>&1 || fail "not logged in to npm (run: npm login)"
 say "Typecheck and tests"
 npm ci --silent
 npm run -s typecheck
-npm test --silent >/dev/null || fail "tests failed (run npm test to see details)"
+npm run -s build
+node dist/main.js changelog "$VERSION" >/dev/null || fail "CHANGELOG.md needs a section for $VERSION"
+node test/run.mjs >/dev/null || fail "tests failed (run npm test to see details)"
 
 say "Ready to publish $NAME@$VERSION as $(npm whoami)"
 read -r -p "Publish now? [y/N] " answer

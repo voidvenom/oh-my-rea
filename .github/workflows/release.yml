@@ -49,4 +49,6 @@ jobs:
       - name: GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag --title "$GITHUB_REF_NAME"
+        run: |
+          node dist/main.js changelog "${GITHUB_REF_NAME#v}" > "$RUNNER_TEMP/omr-release-notes.md"
+          gh release create "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/omr-release-notes.md" --verify-tag --title "$GITHUB_REF_NAME"

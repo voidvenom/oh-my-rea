@@ -104,7 +104,11 @@ omr update      # update omr and REA to the latest npm release
 omr setup       # re-check the environment
 ```
 
-omr checks the registry at most once a day and prints a one-line notice. Disable it with `OMR_NO_UPDATE_CHECK=1`.
+omr uses a 24-hour registry cache. The first interactive launch with an empty cache starts a background check. Once that finishes, the next launch can show the installed and available versions. Set `OMR_NO_UPDATE_CHECK=1` to disable update checks and notices. CI suppresses automatic notices.
+
+## Changelog
+
+Use `omr changelog` for the installed version, `omr changelog 0.5.1` for a specific version, or `omr changelog --all` for the full history. In the TUI, `/changelog` opens a scrollable view. A new installed version shows a short summary once, either after `omr update` or on the first interactive launch with packaged notes. [Full changelog](CHANGELOG.md)
 
 ## Requirements
 
