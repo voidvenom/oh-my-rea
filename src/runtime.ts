@@ -16,7 +16,7 @@ import { registerSessionHandlers } from "./runtime/handlers/sessionHandlers.js";
 import { registerSystemHandlers } from "./runtime/handlers/systemHandlers.js";
 import { registerWorkflowHandlers } from "./runtime/handlers/workflowHandlers.js";
 import { OutputSink } from "./runtime/output.js";
-import { PROJECT_INSTRUCTIONS_LIMIT, createSession } from "./session.js";
+import { createSession } from "./session.js";
 import {
   detectTarget,
   listTargetCandidates,
@@ -86,14 +86,6 @@ export const runOmr = async (
       model: ctx.modelId,
       profile: ctx.activeProfile?.id ?? null,
     });
-    const startupInstructions = ctx.activeProjectInstructions();
-    if (startupInstructions) {
-      output.emit("agents.loaded", {
-        path: startupInstructions.path,
-        chars: startupInstructions.chars,
-        truncated: startupInstructions.truncated,
-      });
-    }
     const ui = output.ui;
     if (ui) {
       ui.setCommands(ctx.allCommands());
@@ -106,18 +98,12 @@ export const runOmr = async (
         candidates,
         session: session.id,
       });
-      if (startupInstructions) ui.addSystem(
-        i18n.t("launch.instructions", { count: startupInstructions.chars, cut: startupInstructions.truncated ? i18n.t("launch.cut", { limit: PROJECT_INSTRUCTIONS_LIMIT }) : "" }), true,
-      );
-      if (ctx.activeProfile) ui.addSystem(
-        i18n.t("launch.profile", { id: ctx.activeProfile.id, summary: ctx.activeProfile.summary, effort: ctx.activeProfile.effort }), true,
-      );
-      ui.setBusy(null);
     } else if (!opts.json) {
       output.write(i18n.t("launch.session", { version: VERSION, target: ctx.currentTarget ?? i18n.t("hud.noTarget"), id: session.id, profile: ctx.activeProfile ? i18n.t("launch.profileTag", { id: ctx.activeProfile.id }) : "" }));
       output.write(i18n.t("launch.model", { id: ctx.modelId, error: ctx.modelController.modelError && !opts.noModel ? ` (${ctx.modelController.modelError})` : "" }));
-      if (startupInstructions) output.write(i18n.t("launch.instructionsPath", { path: startupInstructions.path, count: startupInstructions.chars }));
     }
+    ctx.showStartupNotices();
+    ui?.setBusy(null);
     if (opts.dashboard && !opts.command && !opts.goal) {
       const dashboard = ctx.startDashboard();
       if (!uiEnabled) await dashboard;
@@ -159,6 +145,7 @@ export const runOmr = async (
   };
 
   let lineChain: Promise<void> = Promise.resolve();
+  let languageChain = lineChain;
   const submitQueued = (
     line: string,
     after?: () => void,
@@ -177,21 +164,27 @@ export const runOmr = async (
       }
       return;
     }
-    lineChain = lineChain
+    // Language changes must stay responsive while a turn or tool is awaiting I/O.
+    const liveLanguage = uiEnabled && /^\/(?:lang|language)(?:\s|$)/i.test(trimmed);
+    const pendingLanguage = languageChain;
+    const queued = (liveLanguage ? pendingLanguage : lineChain)
       .then(async () => {
         await initialization;
+        await pendingLanguage;
         const keep = await runLine(line, submitOpts?.images);
         if (!keep) {
           await ctx.shutdown("complete");
           process.exit(0);
         }
-        await ctx.syncLocalStatus();
+        if (!liveLanguage) await ctx.syncLocalStatus();
         after?.();
       })
       .catch((error: unknown) => {
         output.fail(error instanceof Error ? error.message : String(error));
         after?.();
       });
+    if (liveLanguage) languageChain = queued;
+    else lineChain = queued;
   };
   const onUnhandledRejection = (reason: unknown): void => {
     output.fail(
@@ -353,7 +346,7 @@ export const runOmr = async (
       },
     });
     output.setUi(ui);
-    ui.setBusy(i18n.t("launch.initializing"));
+    ui.setBusy((t) => t("launch.initializing"));
     // `--resume` replaces this throwaway session's runtime, so connecting REA for it first would boot a
     // second REA process (and make `/resume` wait for the first one). Connect after the resume instead.
     if (resumeLine) {
@@ -366,7 +359,7 @@ export const runOmr = async (
       output.fail(error instanceof Error ? error.message : String(error));
     });
     void initialization.then(() => import("./setup.js")).then(({ announceRelease }) =>
-      announceRelease(ctx.env, (notice) => ui.addSystem(notice, true), i18n),
+      announceRelease(ctx.env, (notice) => ui.addSystem(notice, true)),
     ).catch(() => {});
     if (!resumeLine) {
       void initialization.then(() => ctx.ensureConnected()).catch(() => {});

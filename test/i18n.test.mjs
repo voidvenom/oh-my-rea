@@ -6,13 +6,14 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { padEndAnsi, truncateAnsi, visibleWidth } from "../dist/ansi.js";
+import { padEndAnsi, stripAnsi, truncateAnsi, visibleWidth } from "../dist/ansi.js";
 import { COMMANDS } from "../dist/commands.js";
 import { en } from "../dist/i18n/en.js";
 import { tr } from "../dist/i18n/tr.js";
 import { I18n } from "../dist/i18n/index.js";
 import { REASONING_EFFORT_LEVELS } from "../dist/modelConfig.js";
 import { systemPrompt } from "../dist/prompts/system.js";
+import { VERSION } from "../dist/version.js";
 import { fixtureEnvironment } from "../scripts/fixture-environment.mjs";
 
 const cli = fileURLToPath(new URL("../bin/omr.js", import.meta.url));
@@ -182,6 +183,64 @@ test("a Turkish-locale PTY paints its splash immediately and /lang persists acro
     await probe("/lang", "Dil: tr (Türkçe)", [], { OMR_LANG: "tr" });
     assert.equal(JSON.parse(await readFile(configPath, "utf8")).language, "en");
     await probe("/lang", "Language: en (English)");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("/lang repaints the running startup activity and startup notices in both directions", {
+  skip: process.platform === "win32",
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "omr-lang-live-"));
+  try {
+    const rea = join(root, "slow-rea.mjs");
+    // Keep the MCP handshake pending until the probe closes the app.
+    await writeFile(rea, "process.stdin.resume();\n");
+    for (const [from, to, before, after] of [["tr", "en", tr, en], ["en", "tr", en, tr]]) {
+      const config = join(root, from, "config");
+      await mkdir(join(config, "rea"), { recursive: true });
+      await writeFile(join(config, "rea", "omr-update.json"), JSON.stringify({
+        checkedAt: Date.now(), latest: { "oh-my-rea": "99.0.0" },
+      }));
+      const env = {
+        ...fixtureEnvironment(from), HOME: root, XDG_CONFIG_HOME: config,
+        OMR_SESSIONS_DIR: join(root, from, "sessions"), OMR_REA_COMMAND: rea,
+        OMR_SKIP_SETUP: "1", TERM: "xterm-256color", NO_COLOR: "1",
+      };
+      const dump = join(root, `${from}.log`);
+      const heading = (catalog) => catalog["changelog.whatsNew"].replace("{version}", VERSION);
+      const footer = (catalog) => catalog["changelog.see"].split("`")[0].trimEnd();
+      const update = (catalog) => catalog["setup.updateAvailable"].replace("{packages}", `omr ${VERSION} → 99.0.0`);
+      // In one direction also queue a command that has to wait for the same handshake.
+      const commands = (from === "en" ? `/open ${rea}\r` : "") + `/lang ${to}\r`;
+      const { stdout } = await run("python3", [
+        ptyProbe, "--after-alt", "--timeout", "8", "--dump", dump,
+        "--type", commands,
+        "--mark", `activity=${before["runtime.startingRea"]}`,
+        "--mark", `heading=${heading(before)}`, "--mark", `update=${update(before)}`,
+        "--send-on", "activity", "--send-on", "heading", "--send-on", "update",
+        "--mark", `switched=(${after["status.cancel"]})`, "--stop-on", "switched",
+        "--", process.execPath, cli, "--no-model",
+      ], { cwd: root, env, timeout: 14_000 });
+      const result = JSON.parse(stdout);
+      for (const mark of Object.values(result.marks)) assert.notEqual(mark, null, `${from} → ${to}\n${stdout}`);
+      const frames = (await readFile(dump, "utf8")).split("\x1b[?2026h");
+      const lastFrame = frames.findLast((frame) => frame.includes(`(${after["status.cancel"]})`));
+      const status = stripAnsi(lastFrame.match(/\x1b\[40;1H(.*?)\x1b\[K/)?.[1] ?? "");
+      for (const key of ["runtime.startingRea", "status.cancel", "status.noModel", "status.context"]) {
+        assert.ok(status.includes(after[key]), status);
+        assert.ok(!status.includes(before[key]), status);
+      }
+      const rendered = stripAnsi(lastFrame);
+      const bitstream = (catalog, locale) => `${catalog["hud.bitstream"].toLocaleUpperCase(locale)} (${catalog["hud.binaryOn"]})`;
+      for (const text of [heading(after), footer(after), update(after), after["composer.busy"], after["hero.connecting"], bitstream(after, to)]) {
+        assert.ok(rendered.includes(text), `Missing ${text} in ${from} → ${to}\n${rendered}`);
+      }
+      for (const text of [heading(before), footer(before), update(before), bitstream(before, from)]) {
+        assert.ok(!rendered.includes(text), rendered);
+      }
+      assert.ok(frames.some((frame) => frame.includes("A language switch hint on the startup screen.")));
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }

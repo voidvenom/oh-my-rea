@@ -4,6 +4,7 @@ import type { en } from "./en.js";
 export type Language = "en" | "tr";
 type English = typeof en;
 export type MessageKey = keyof English;
+export type LocalizedMessage = (t: I18n["t"]) => string;
 export type Catalog = { readonly [K in MessageKey]: string };
 type Fields<S extends string> = S extends `${string}{${infer Field}}${infer Rest}`
   ? Field | Fields<Rest> : never;

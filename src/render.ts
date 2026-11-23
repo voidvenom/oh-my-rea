@@ -131,12 +131,12 @@ export const renderClassMatches = (payload: unknown, { t }: I18n, limit = 30): s
   return lines.join("\n");
 };
 
-export const renderSession = (payload: unknown, language?: I18n): string => {
+export const renderSession = (payload: unknown, { t }: I18n): string => {
   const record = asRecord(normalized(payload));
   if (!record) return compactJson(payload);
   const open = record["open"] === true;
   const lines: string[] = [];
-  const target = padEndAnsi(language?.t("hud.target") || "target", 10);
+  const target = padEndAnsi(t("hud.target"), 10);
   if (open) {
     const architecture = str(record["architecture"]);
     lines.push(
@@ -146,7 +146,7 @@ export const renderSession = (payload: unknown, language?: I18n): string => {
       `sha256    ${shortSha(record["sha256"])}… · open=${open} cleanup_pending=${String(record["cleanup_pending"])}`,
     );
   } else {
-    lines.push(target + (language?.t("status.targetMissing") || "(no target open in binary_session)"));
+    lines.push(target + t("status.targetMissing"));
   }
   const providers: string[] = [];
   for (const candidate of asArray(record["analysis_provider_candidates"])) {
@@ -157,7 +157,7 @@ export const renderSession = (payload: unknown, language?: I18n): string => {
     const status = str(availability?.["status"], "?");
     if (status === "available") providers.push(str(provider["id"], "?"));
   }
-  if (providers.length > 0) lines.push(`${language?.t("status.providers") || "providers"} ${providers.join(", ")}`);
+  if (providers.length > 0) lines.push(`${t("status.providers")} ${providers.join(", ")}`);
   const binding = asRecord(record["analysis_provider_binding"]);
   if (binding) {
     const bindingProvider = asRecord(binding["provider"]);
@@ -165,7 +165,7 @@ export const renderSession = (payload: unknown, language?: I18n): string => {
       str(binding["provider_id"]) ||
       str(binding["id"]) ||
       str(bindingProvider?.["id"]);
-    if (bindingId) lines.push(`${padEndAnsi(language?.t("status.bound") || "bound", 10)}${bindingId}`);
+    if (bindingId) lines.push(`${padEndAnsi(t("status.bound"), 10)}${bindingId}`);
   }
   return lines.join("\n");
 };

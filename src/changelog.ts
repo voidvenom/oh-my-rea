@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { I18n } from "./i18n/index.js";
+import type { I18n, LocalizedMessage } from "./i18n/index.js";
 import { VERSION } from "./version.js";
 
 export const CHANGELOG_FILE = new URL("../CHANGELOG.md", import.meta.url);
@@ -32,12 +32,11 @@ export const releaseSummary = (section: string): string => {
 };
 
 /** Claim a version only when it has notes. An exclusive create keeps concurrent launches from repeating them. */
-export const whatsNew = async (
+export const whatsNewMessage = async (
   env: NodeJS.ProcessEnv = process.env,
   version = VERSION,
   file: URL | string = CHANGELOG_FILE,
-  language?: I18n,
-): Promise<string | null> => {
+): Promise<LocalizedMessage | null> => {
   if (env["CI"] || !/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(version)) return null;
   try {
     const section = await changelogText(version, file);
@@ -46,11 +45,20 @@ export const whatsNew = async (
     const dir = join(env["XDG_CONFIG_HOME"] ?? join(homedir(), ".config"), "rea", "omr-release-notes");
     await mkdir(dir, { recursive: true, mode: 0o700 });
     await writeFile(join(dir, version), "", { flag: "wx", mode: 0o600 });
-    const { t } = language ?? await (await import("./i18n/index.js")).englishI18n();
-    return `${t("changelog.whatsNew", { version })}\n${summary}\n${t("changelog.see", { version })}`;
+    return (t) => `${t("changelog.whatsNew", { version })}\n${summary}\n${t("changelog.see", { version })}`;
   } catch {
     return null;
   }
+};
+
+export const whatsNew = async (
+  env: NodeJS.ProcessEnv = process.env,
+  version = VERSION,
+  file: URL | string = CHANGELOG_FILE,
+  language?: I18n,
+): Promise<string | null> => {
+  const message = await whatsNewMessage(env, version, file);
+  return message ? message((language ?? await (await import("./i18n/index.js")).englishI18n()).t) : null;
 };
 
 export const changelogError = (i18n: I18n, error: unknown): string =>

@@ -27,7 +27,7 @@ import {
 } from "./binaryArt.js";
 import { summarizeToolCall } from "./broker.js";
 import { normalizeTypedAhead, takeEarlyInput } from "./earlyInput.js";
-import { I18n, type MessageKey } from "./i18n/index.js";
+import { I18n, type LocalizedMessage, type MessageKey } from "./i18n/index.js";
 import { ledgerHealthLabel } from "./render.js";
 import {
   copyTextToClipboard,
@@ -205,7 +205,7 @@ type TimelineEntry =
       rev: number;
       cache?: EntryRenderCache;
     }
-  | { kind: "system"; text: string; rev: number; startup?: boolean; cache?: EntryRenderCache }
+  | { kind: "system"; text: string; rev: number; startup?: boolean; localize?: LocalizedMessage; cache?: EntryRenderCache }
   | { kind: "error"; text: string; rev: number; cache?: EntryRenderCache };
 
 interface ViewportSelection {
@@ -269,7 +269,7 @@ interface ModelPickerState {
   selectedRow: number;
   query: string;
   loading: boolean;
-  notice: string | null;
+  notice: string | LocalizedMessage | null;
 }
 
 interface SessionPickerState {
@@ -318,11 +318,16 @@ const MAX_TIMELINE_CHARS = 240_000;
 const MAX_ENTRY_CHARS = 8_000;
 const MAX_TOOL_GROUP = 16;
 
+const binaryModeKeys = {
+  busy: "hud.binaryBusy", eco: "hud.binaryEco", off: "hud.binaryOff", on: "hud.binaryOn",
+} satisfies Record<BinaryFlowMode, MessageKey>;
+
 const paletteBadgeKeys = {
   FLOW: "badge.flow", ASK: "badge.prompt", LOCAL: "badge.local", ARG: "badge.args",
   DIR: "badge.dir", FILE: "badge.file", NOW: "badge.now", MODE: "badge.mode",
   DFLT: "badge.default", CONN: "badge.connected", SETUP: "badge.setup", THINK: "badge.thinking",
   UI: "badge.ui", IMG: "badge.image", BIN: "badge.binary", LIVE: "badge.live",
+  SYNC: "badge.sync", LIST: "badge.list", ENDP: "badge.endpoint",
 } satisfies Record<string, MessageKey>;
 
 const timelineText = (i18n: I18n, text: string): string => {
@@ -528,7 +533,7 @@ export class TerminalUi {
     query: "",
   };
 
-  private busy: string | null = null;
+  private busy: string | LocalizedMessage | null = null;
   private busyStartedAt = 0;
   private networkGuard: InternalNetworkGuard | null = null;
   private binaryMode: BinaryFlowMode = "on";
@@ -558,7 +563,7 @@ export class TerminalUi {
     leftCellWidth: number;
     lines: readonly string[];
   } = { startLine: 0, height: 0, leftCellWidth: 0, lines: [] };
-  private clipboardNotice: { text: string; until: number } | null = null;
+  private clipboardNotice: { text: LocalizedMessage; until: number } | null = null;
   private clipboardNoticeTimer: NodeJS.Timeout | null = null;
 
   private streamEntry: Extract<TimelineEntry, { kind: "assistant" }> | null =
@@ -663,8 +668,7 @@ export class TerminalUi {
     this.picker.pendingSaveDefault = false;
     this.picker.query = "";
     this.picker.loading = loading;
-    this.picker.notice =
-      this.i18n.t("picker.compactionHelp");
+    this.picker.notice = (t) => t("picker.compactionHelp");
     this.paletteOpen = false;
     this.outputExpanded = false;
     this.picker.selectedTab = 0;
@@ -987,12 +991,12 @@ export class TerminalUi {
     }
     this.stagedImages.push(attachment);
     this.setClipboardNotice(
-      this.i18n.t("clipboard.added", { label: attachment.label }),
+      (t) => t("clipboard.added", { label: attachment.label }),
     );
     this.paint();
   }
 
-  private setClipboardNotice(text: string, durationMs = 2_800): void {
+  private setClipboardNotice(text: LocalizedMessage, durationMs = 2_800): void {
     if (this.clipboardNoticeTimer) {
       clearTimeout(this.clipboardNoticeTimer);
       this.clipboardNoticeTimer = null;
@@ -1018,7 +1022,7 @@ export class TerminalUi {
     this.reasoningEntry = null;
   }
 
-  setBusy(label: string | null): void {
+  setBusy(label: string | LocalizedMessage | null): void {
     const wasBusy = this.busy !== null;
     this.busy = label;
     if (label && !wasBusy) this.busyStartedAt = Date.now();
@@ -1040,8 +1044,12 @@ export class TerminalUi {
     this.paint();
   }
 
-  addSystem(text: string, startup = false): void {
-    this.timeline.push({ kind: "system", text: timelineText(this.i18n, text), rev: 1, startup });
+  addSystem(message: string | LocalizedMessage, startup = false): void {
+    const text = typeof message === "string" ? message : message(this.i18n.t);
+    this.timeline.push({
+      kind: "system", text: timelineText(this.i18n, text), rev: 1, startup,
+      ...(typeof message === "function" && { localize: message }),
+    });
     this.trimTimeline();
     this.scroll = 0;
     this.paint();
@@ -1874,7 +1882,7 @@ export class TerminalUi {
           if (selected.trim().length > 0) {
             this.writeToClipboard(selected);
             this.setClipboardNotice(
-              this.i18n.t("clipboard.selection", { count: selected.length }),
+              (t) => t("clipboard.selection", { count: selected.length }),
             );
           }
         } else {
@@ -1956,7 +1964,7 @@ export class TerminalUi {
       if (selected) {
         this.writeToClipboard(selected);
         this.setClipboardNotice(
-          this.i18n.t("clipboard.selection", { count: selected.length }),
+          (t) => t("clipboard.selection", { count: selected.length }),
         );
       }
       this.paint();
@@ -1968,7 +1976,7 @@ export class TerminalUi {
         const plain = stripAnsi(entry.text).trim();
         this.writeToClipboard(plain);
         this.setClipboardNotice(
-          this.i18n.t("clipboard.answer", { count: plain.length }),
+          (t) => t("clipboard.answer", { count: plain.length }),
         );
         this.paint();
         return;
@@ -1978,7 +1986,7 @@ export class TerminalUi {
       const plain = stripAnsi(this.output.text).trim();
       this.writeToClipboard(plain);
       this.setClipboardNotice(
-        this.i18n.t("clipboard.output", { count: plain.length }),
+        (t) => t("clipboard.output", { count: plain.length }),
       );
       this.paint();
     }
@@ -2036,7 +2044,7 @@ export class TerminalUi {
           return;
         }
       }
-      this.setClipboardNotice(this.i18n.t("clipboard.empty"));
+      this.setClipboardNotice((t) => t("clipboard.empty"));
       this.paint();
     } catch {
       // Ignore clipboard read errors
@@ -2509,7 +2517,9 @@ export class TerminalUi {
         ) ??
         this.picker.providers.find((p) => p.connected) ??
         this.picker.providers[0];
-      const inheritLabel = `active (${this.picker.activeProviderId ? `${this.picker.activeProviderId}:` : ""}${this.picker.activeModelId || this.i18n.t("picker.primary")})`;
+      const inheritLabel = this.i18n.t("picker.activeLabel", {
+        model: `${this.picker.activeProviderId ? `${this.picker.activeProviderId}:` : ""}${this.picker.activeModelId || this.i18n.t("picker.primary")}`,
+      });
       if (
         activeProv &&
         (tokens.length === 0 ||
@@ -2687,8 +2697,7 @@ export class TerminalUi {
       case "\x12": // Ctrl+R
       case "\x1br": // Alt+R
         this.picker.loading = true;
-        this.picker.notice =
-          this.i18n.t("picker.refreshing");
+        this.picker.notice = (t) => t("picker.refreshing");
         this.syncFlowTimer();
         this.paint();
         this.options.onRefreshModels?.();
@@ -2783,7 +2792,8 @@ export class TerminalUi {
     if (!selected) {
       const tab = this.pickerTabs()[this.picker.selectedTab];
       if (tab?.provider && !tab.provider.connected && !tab.provider.local) {
-        this.picker.notice = this.i18n.t("picker.needsKey", { key: tab.provider.envHint });
+        const { envHint } = tab.provider;
+        this.picker.notice = (t) => t("picker.needsKey", { key: envHint });
         this.paint();
       }
       return;
@@ -2800,12 +2810,12 @@ export class TerminalUi {
       return;
     }
     if (!selected.provider.connected && !selected.provider.local) {
-      this.picker.notice = this.i18n.t("picker.needsProviderKey", { key: selected.provider.envHint, provider: selected.provider.name });
+      this.picker.notice = (t) => t("picker.needsProviderKey", { key: selected.provider.envHint, provider: selected.provider.name });
       this.paint();
       return;
     }
     if (!selected.provider.baseUrl) {
-      this.picker.notice = this.i18n.t("picker.needsUrl", { key: selected.provider.envHint });
+      this.picker.notice = (t) => t("picker.needsUrl", { key: selected.provider.envHint });
       this.paint();
       return;
     }
@@ -2857,7 +2867,7 @@ export class TerminalUi {
     if (this.cursor === 0) {
       if (this.composer.length === 0 && this.stagedImages.length > 0) {
         const removed = this.stagedImages.pop()!;
-        this.setClipboardNotice(this.i18n.t("clipboard.removed", { label: removed.label }));
+        this.setClipboardNotice((t) => t("clipboard.removed", { label: removed.label }));
       }
       return;
     }
@@ -3301,8 +3311,7 @@ export class TerminalUi {
             badgeKind: "local",
             label: "refresh",
             usage: "",
-            description:
-              "Fetch all live models & capabilities from configured API key & endpoint (/v1/models)",
+            description: this.i18n.t("palette.refreshModels"),
             completion: "/model refresh",
             submitOnEnter: true,
           },
@@ -3312,8 +3321,7 @@ export class TerminalUi {
             badgeKind: "local",
             label: "list",
             usage: "[search_query]",
-            description:
-              "List all discovered models & capability tags across connected providers",
+            description: this.i18n.t("palette.listModels"),
             completion: "/model list",
             submitOnEnter: true,
           },
@@ -3920,7 +3928,7 @@ export class TerminalUi {
     const leftFill = Math.max(0, leftWidth - visibleWidth(leftPart) - 1);
     const leftComplete = `${leftPart}${t.border}${hline(leftFill)}┬${t.reset}`;
 
-    const rightTitle = ` ${t.neonCyan}${t.bold}HUD${t.reset} ${t.muted}·${t.reset} ${reaState} `;
+    const rightTitle = ` ${t.neonCyan}${t.bold}${this.i18n.t("hud.title")}${t.reset} ${t.muted}·${t.reset} ${reaState} `;
     const rightFill = Math.max(0, hudWidth - visibleWidth(rightTitle) - 1);
     const rightComplete = `${rightTitle}${t.border}${hline(rightFill)}╮${t.reset}`;
     return truncateAnsi(`${leftComplete}${rightComplete}`, cols);
@@ -4173,7 +4181,8 @@ export class TerminalUi {
         out.push(`  ${t.subtle}${entry.meta}${t.reset}`);
       }
     } else if (entry.kind === "system") {
-      for (const sLine of wrapPlain(entry.text, Math.max(6, width - 3), true)) {
+      const text = entry.localize ? timelineText(this.i18n, entry.localize(this.i18n.t)) : entry.text;
+      for (const sLine of wrapPlain(text, Math.max(6, width - 3), true)) {
         out.push(
           `${t.muted}· ${styleInlineMarkdown(sLine, t, t.muted)}${t.reset}`,
         );
@@ -4217,7 +4226,7 @@ export class TerminalUi {
 
     // 1. Live Binary / Hex Oscilloscope
     rows.push(
-      `${t.neonMint}${t.bold}◈ ${this.i18n.upper(this.i18n.t("hud.bitstream"))}${t.reset} ${t.subtle}(${this.binaryMode})${t.reset}`,
+      `${t.neonMint}${t.bold}◈ ${this.i18n.upper(this.i18n.t("hud.bitstream"))}${t.reset} ${t.subtle}(${this.i18n.t(binaryModeKeys[this.binaryMode])})${t.reset}`,
     );
     const binaryRows = renderHudBinaryStrip(
       width,
@@ -4270,7 +4279,7 @@ export class TerminalUi {
     rows.push(
       kv(
         this.i18n.t("hud.thinking"),
-        this.status.effort,
+        this.status.effort === "auto" ? this.i18n.t("hud.effortAuto") : this.status.effort,
         this.status.effort === "auto" ? t.fg : t.neonMint,
       ),
     );
@@ -4586,7 +4595,7 @@ export class TerminalUi {
           ? `${t.muted} · ${this.i18n.t("net.holding")}${t.reset}`
           : "";
       bodyText =
-        `${t.amber}${spin}${t.reset} ${t.neonCyan}${t.bold}PING ──▸ ${g.target}${t.reset}` +
+        `${t.amber}${spin}${t.reset} ${t.neonCyan}${t.bold}${this.i18n.t("net.pingLabel")} ──▸ ${g.target}${t.reset}` +
         `${t.muted} · ${t.reset}${t.amber}${reasonClipped}${t.reset}${holdNote}`;
     }
 
@@ -4617,7 +4626,7 @@ export class TerminalUi {
     const spin = SPINNER_FRAMES[this.tick % SPINNER_FRAMES.length];
     const body = padEndAnsi(
       truncateAnsi(
-        `${t.amber}${spin} ${this.i18n.upper(this.i18n.t("net.title"))} · ${t.neonCyan}PING ──▸ ${g.target}${t.amber} #${g.attempt} · ${g.reason || this.i18n.t("net.offline")}${t.reset}`,
+        `${t.amber}${spin} ${this.i18n.upper(this.i18n.t("net.title"))} · ${t.neonCyan}${this.i18n.t("net.pingLabel")} ──▸ ${g.target}${t.amber} #${g.attempt} · ${g.reason || this.i18n.t("net.offline")}${t.reset}`,
         innerW,
       ),
       innerW,
@@ -4706,10 +4715,11 @@ export class TerminalUi {
 
     let rightRendered: string;
     if (this.clipboardNotice && Date.now() < this.clipboardNotice.until) {
-      rightRendered = `${t.neonMint}${t.bold}${this.clipboardNotice.text}${t.reset}`;
+      rightRendered = `${t.neonMint}${t.bold}${this.clipboardNotice.text(this.i18n.t)}${t.reset}`;
     } else if (this.hasActiveSelection()) {
       rightRendered = `${t.neonCyan}${t.bold}${this.i18n.t("status.selection")}${t.reset}`;
     } else if (this.busy) {
+      const label = typeof this.busy === "function" ? this.busy(this.i18n.t) : this.busy;
       const spin = SPINNER_FRAMES[this.tick % SPINNER_FRAMES.length];
       const elapsed =
         this.busyStartedAt > 0
@@ -4719,7 +4729,7 @@ export class TerminalUi {
         this.binaryMode !== "off"
           ? `${renderBinaryPulse(this.tick, this.status.magic?.bytes ?? null, t, 6)} `
           : "";
-      rightRendered = `${pulse}${t.neonCyan}${spin} ${this.busy}${elapsed}${t.reset} ${t.muted}(${this.i18n.t("status.cancel")})${t.reset}`;
+      rightRendered = label ? `${pulse}${t.neonCyan}${spin} ${label}${elapsed}${t.reset} ${t.muted}(${this.i18n.t("status.cancel")})${t.reset}` : "";
     } else if (Date.now() < this.ctrlCArmedUntil) {
       rightRendered = `${t.amber}${t.bold}${this.i18n.t("status.exit")}${t.reset}`;
     } else if (width < 96) {
@@ -5163,7 +5173,8 @@ export class TerminalUi {
         if (footerInfoRows >= 2) {
           let info2: string;
           if (this.picker.notice) {
-            info2 = `${t.amber}◈ ${this.picker.notice}${t.reset}`;
+            const notice = typeof this.picker.notice === "function" ? this.picker.notice(this.i18n.t) : this.picker.notice;
+            info2 = `${t.amber}◈ ${notice}${t.reset}`;
           } else if (
             focusProvider &&
             !focusProvider.connected &&

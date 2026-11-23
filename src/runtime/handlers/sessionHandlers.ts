@@ -632,7 +632,7 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
     const preview = ui ? await previewSavedSession(arg, ctx.session.id, ctx.sessionsRootDir) : null;
     if (preview) {
       ui?.hydrateFromHistory(preview.messages);
-      ui?.setBusy(ctx.output.i18n.t("sessionResult.restoring"));
+      ui?.setBusy((t) => t("sessionResult.restoring"));
     }
     const loaded = await loadSavedSession(
       arg,
@@ -646,7 +646,7 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
       return;
     }
     if (!preview || preview.id !== loaded.summary.id) ui?.hydrateFromHistory(loaded.messages);
-    ui?.setBusy(ctx.output.i18n.t("sessionResult.restoring"));
+    ui?.setBusy((t) => t("sessionResult.restoring"));
     try {
       const source = sessionInfoFromSummary(loaded.summary);
       const continuation = await forkSession(source, loaded.messages, loaded.summary.target, ctx.modelId, {label: "resume", rootDir: ctx.sessionsRootDir});
@@ -916,7 +916,7 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
       }
     }
     ctx.activeAbort = new AbortController();
-    ctx.output.ui?.setBusy(ctx.output.i18n.t("sessionResult.compacting", { strategy }));
+    ctx.output.ui?.setBusy((t) => t("sessionResult.compacting", { strategy }));
     try {
       const report = await ctx.agent.compactWith(
         strategy,

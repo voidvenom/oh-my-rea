@@ -16,7 +16,7 @@ import { createInterface } from "node:readline/promises";
 import { promisify } from "node:util";
 import { padEndAnsi, visibleWidth } from "./ansi.js";
 import { resolveReaEnv } from "./env.js";
-import type { I18n } from "./i18n/index.js";
+import type { I18n, LocalizedMessage } from "./i18n/index.js";
 import { resolveReaLauncher } from "./reaLauncher.js";
 import { VERSION } from "./version.js";
 
@@ -215,7 +215,7 @@ const pendingRefreshes = new Map<string, Promise<UpdateCache>>();
 
 const english = async (): Promise<I18n> => (await import("./i18n/index.js")).englishI18n();
 
-export const updateNotice = async (env: NodeJS.ProcessEnv = process.env, language?: I18n): Promise<string | null> => {
+const updateNoticeMessage = async (env: NodeJS.ProcessEnv): Promise<LocalizedMessage | null> => {
   if (env["OMR_NO_UPDATE_CHECK"] === "1" || env["CI"]) return null;
   const cache = await readCache(env);
   const needsRegistry = !cache || Date.now() - cache.checkedAt >= CHECK_INTERVAL_MS;
@@ -236,13 +236,20 @@ export const updateNotice = async (env: NodeJS.ProcessEnv = process.env, languag
   const outdated: string[] = [];
   if (isNewer(cache.latest[OMR_PACKAGE], VERSION)) outdated.push(`omr ${VERSION} → ${cache.latest[OMR_PACKAGE]}`);
   if (isNewer(cache.latest[REA_PACKAGE], installed)) outdated.push(`rea ${installed} → ${cache.latest[REA_PACKAGE]}`);
-  return outdated.length ? (language ?? await english()).t("setup.updateAvailable", { packages: outdated.join(", ") }) : null;
+  if (!outdated.length) return null;
+  const packages = outdated.join(", ");
+  return (t) => t("setup.updateAvailable", { packages });
 };
 
-export const announceRelease = async (env: NodeJS.ProcessEnv, display: (text: string) => void, language: I18n): Promise<void> => {
+export const updateNotice = async (env: NodeJS.ProcessEnv = process.env, language?: I18n): Promise<string | null> => {
+  const message = await updateNoticeMessage(env);
+  return message ? message((language ?? await english()).t) : null;
+};
+
+export const announceRelease = async (env: NodeJS.ProcessEnv, display: (message: LocalizedMessage) => void): Promise<void> => {
   await Promise.all([
-    updateNotice(env, language).then((notice) => { if (notice) display(notice); }),
-    import("./changelog.js").then(({ whatsNew }) => whatsNew(env, VERSION, undefined, language)).then((notes) => { if (notes) display(notes); }),
+    updateNoticeMessage(env).then((notice) => { if (notice) display(notice); }),
+    import("./changelog.js").then(({ whatsNewMessage }) => whatsNewMessage(env)).then((notes) => { if (notes) display(notes); }),
   ]);
 };
 

@@ -7,6 +7,7 @@ import {
   type ReaBroker,
   type ToolSelectionContext,
 } from "./broker.js";
+import type { LocalizedMessage } from "./i18n/index.js";
 import type { ModelPort, ToolDefinition } from "./model.js";
 import { findOmrWorkflow } from "./prompts.js";
 import { asArray, asRecord, asString } from "./values.js";
@@ -365,7 +366,7 @@ export class SubagentRunner {
       readonly stepContext?: import("./agent.js").AgentOptions["stepContext"];
       readonly turnContext?: (() => string | null) | undefined;
       readonly trace?: ((scope: string, type: string, data: Record<string, unknown>) => Promise<void>) | undefined;
-      readonly onProgress?: ((message: string) => void) | undefined;
+      readonly onProgress?: ((message: string, localize: LocalizedMessage) => void) | undefined;
       readonly onEvidenceCollected?:
         | ((evidenceIds: readonly string[]) => void)
         | undefined;
@@ -618,10 +619,10 @@ export class SubagentRunner {
 
       return await this.limiter.run(async () => {
         const execute = async (): Promise<SubagentTaskResult> => {
-        const notify = (msg: string): void => {
+        const notify = (msg: string, localize: LocalizedMessage): void => {
           node.currentActivity = msg;
           onProgress?.(`[${node.id}] ${msg}`);
-          this.deps.onProgress?.(`[${node.id}] ${msg}`);
+          this.deps.onProgress?.(`[${node.id}] ${msg}`, (t) => `[${node.id}] ${localize(t)}`);
           this.persistSnapshot();
         };
 
@@ -735,6 +736,7 @@ export class SubagentRunner {
           isResumedSteer
             ? `resumed with supervisor steering directive`
             : `starting (${node.role})`,
+          (t) => isResumedSteer ? t("workflow.subagentResuming") : t("workflow.subagentStarting", { role: node.role }),
         );
 
         const tokensBefore = node.agent.ownTokens;
@@ -758,7 +760,8 @@ export class SubagentRunner {
                 tools: [],
               };
               node.stepsLog.push(activeStepTrace);
-              notify(`step ${step}/${stepCap(node.maxSteps)} · thinking`);
+              const limit = stepCap(node.maxSteps);
+              notify(`step ${step}/${limit} · thinking`, (t) => t("workflow.subagentThinking", { step, limit }));
             },
             onReasoningDelta: (delta) => {
               if (!activeStepTrace) return;
@@ -787,9 +790,10 @@ export class SubagentRunner {
                 evidenceIds: [],
                 resultPreview: "",
               });
-              notify(
-                `step ${node.currentStep}/${stepCap(node.maxSteps)} → ${displayTool}${summary ? `(${summary})` : ""}`,
-              );
+              const step = node.currentStep;
+              const limit = stepCap(node.maxSteps);
+              const tool = `${displayTool}${summary ? `(${summary})` : ""}`;
+              notify(`step ${step}/${limit} → ${tool}`, (t) => t("workflow.subagentTool", { step, limit, tool }));
             },
             onToolEnd: (callId, outcome) => {
               const trace = activeStepTrace?.tools.find(
@@ -815,9 +819,8 @@ export class SubagentRunner {
                     step;
                 }
               }
-              notify(
-                `⚡ steered at step ${step}: "${clipPreview(directives.join("; "), 60)}"`,
-              );
+              const directive = clipPreview(directives.join("; "), 60);
+              notify(`⚡ steered at step ${step}: "${directive}"`, (t) => t("workflow.subagentSteered", { step, directive }));
             },
           },
           abort.signal,

@@ -68,7 +68,7 @@ const main = async (): Promise<number> => {
   if (stop !== null) return stop;
   if (!wantsTui && !opts.json && process.stdout.isTTY) {
     const notices = languageReady().then(() =>
-      setup.announceRelease(resolveReaEnv().env, (notice) => process.stderr.write(`${notice}\n`), i18n),
+      setup.announceRelease(resolveReaEnv().env, (notice) => process.stderr.write(`${notice(i18n.t)}\n`)),
     ).catch(() => {});
     if (opts.command || opts.goal) await notices;
   }

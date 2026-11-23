@@ -42,6 +42,7 @@ import {
   type CustomCommandSpec,
 } from "../customCommands.js";
 import type { Dashboard } from "../dashboard.js";
+import type { LocalizedMessage } from "../i18n/index.js";
 import { JournalTailer } from "../journal.js";
 import type { ChatImageBlock, ChatMessage, ModelPort } from "../model.js";
 import type { ModelConfig } from "../modelConfig.js";
@@ -60,6 +61,7 @@ import {
 } from "../rea.js";
 import { normalized, renderOpen } from "../render.js";
 import {
+  PROJECT_INSTRUCTIONS_LIMIT,
   readOperatorDirective,
   readProjectInstructions,
   saveCodeBlockToDisk,
@@ -261,7 +263,7 @@ export class OmrContext {
       historyCheckpoint: (scope, messages, reason) => runtime.events.captureConversation(`${runtime.id}:${scope}`, messages, reason),
       archiveProjection: input => runtime.archive.project(input),
       trace: async (scope, type, data) => { await runtime.events.append(type, {scope: `${runtime.id}:${scope}`, ...data}); },
-      onProgress: (msg) => { if (this.runtime === runtime) this.output.ui?.setBusy(msg); },
+      onProgress: (_msg, localize) => { if (this.runtime === runtime) this.output.ui?.setBusy(localize); },
       onEvidenceCollected: (evidenceIds) => {
         if (this.runtime !== runtime) return;
         for (const id of evidenceIds) {
@@ -403,7 +405,7 @@ export class OmrContext {
     }
 
     this.output.ui?.addUser(rawLine);
-    this.output.ui?.setBusy(this.output.i18n.t("runtime.shellRunning", { command: bang.command }));
+    this.output.ui?.setBusy((t) => t("runtime.shellRunning", { command: bang.command }));
     const abort = new AbortController();
     this.activeAbort = abort;
     try {
@@ -442,6 +444,26 @@ export class OmrContext {
 
   activeProjectInstructions(): ProjectInstructions | null {
     return this.agentsMdEnabled ? readProjectInstructions(this.cwd) : null;
+  }
+
+  showStartupNotices(): void {
+    const ui = this.output.ui;
+    const instructions = this.activeProjectInstructions();
+    if (instructions) {
+      const { path, chars, truncated } = instructions;
+      this.output.emit("agents.loaded", { path, chars, truncated });
+      if (ui) {
+        ui.addSystem((t) => t("launch.instructions", {
+          count: chars, cut: truncated ? t("launch.cut", { limit: PROJECT_INSTRUCTIONS_LIMIT }) : "",
+        }), true);
+      } else if (!this.opts.json) {
+        this.output.write(this.output.i18n.t("launch.instructionsPath", { path, count: chars }));
+      }
+    }
+    const profile = this.activeProfile;
+    if (profile) ui?.addSystem((t) => t("launch.profile", {
+      id: profile.id, summary: profile.summary, effort: profile.effort,
+    }), true);
   }
 
   currentToolContext(): ToolSelectionContext {
@@ -856,7 +878,7 @@ export class OmrContext {
       await runtime.investigation.initialize();
       await runtime.browser.context.initialize();
       this.booting = true;
-      this.output.ui?.setBusy(this.output.i18n.t("runtime.startingRea"));
+      this.output.ui?.setBusy((t) => t("runtime.startingRea"));
       if (!this.output.ui && !this.opts.json) {
         this.output.write(this.output.i18n.t("runtime.startingReaNotice"));
       }
@@ -976,7 +998,7 @@ export class OmrContext {
     if (this.openingPromise) return this.openingPromise;
     this.openingPromise = (async () => {
       this.opening = true;
-      this.output.ui?.setBusy(this.output.i18n.t("runtime.openingTarget"));
+      this.output.ui?.setBusy((t) => t("runtime.openingTarget"));
       if (!this.output.ui && !this.opts.json) {
         this.output.write(this.output.i18n.t("runtime.openingTargetNotice"));
       }
@@ -1205,9 +1227,9 @@ export class OmrContext {
     const evidenceBefore = this.evidenceSeen.size;
     let streamedPlainLineOpen = false;
     let streamedAny = false;
-    let activeToolLabel = "tool";
+    let activeToolLabel = "";
     let wasInterruptedForSteer = false;
-    ui?.setBusy(this.output.i18n.t("runtime.thinking"));
+    ui?.setBusy((t) => t("runtime.thinking"));
 
     try {
       try {
@@ -1288,7 +1310,7 @@ export class OmrContext {
           onNetworkStatus: (notice) => {
             ui?.setNetworkStatus(notice);
             if (notice.state === "restored") {
-              ui?.setBusy(this.output.i18n.t("runtime.networkBack"));
+              ui?.setBusy((t) => t("runtime.networkBack"));
               if (!ui && !this.opts.json) {
                 this.output.writeError(
                   this.output.i18n.t("runtime.networkRestored", { target: notice.target, latency: notice.latencyMs !== null ? ` · ${notice.latencyMs}ms` : "" }),
@@ -1296,7 +1318,7 @@ export class OmrContext {
               }
             } else {
               ui?.setBusy(
-                this.output.i18n.t("runtime.networkPing", { attempt: notice.attempt, target: notice.target }),
+                (t) => t("runtime.networkPing", { attempt: notice.attempt, target: notice.target }),
               );
               if (
                 !ui &&
@@ -1314,7 +1336,7 @@ export class OmrContext {
             }
           },
           onCompactionStart: (strategy) =>
-            ui?.setBusy(this.output.i18n.t("runtime.compacting", { strategy })),
+            ui?.setBusy((t) => t("runtime.compacting", { strategy })),
           onCompaction: (report) => {
             const text = describeCompaction(report);
             if (ui) ui.addSystem(text);
@@ -1334,13 +1356,16 @@ export class OmrContext {
             });
           },
           onRetry: (notice) => {
-            const text = `model ${notice.reason} · retry ${notice.attempt}/${notice.maxRetries} in ${(notice.delayMs / 1000).toFixed(1)}s`;
-            ui?.setBusy(text);
-            if (!ui && !this.opts.json) this.output.writeError(text);
+            const retry: LocalizedMessage = (t) => t("runtime.retrying", {
+              reason: notice.reason, attempt: notice.attempt, total: notice.maxRetries, delay: (notice.delayMs / 1000).toFixed(1),
+            });
+            ui?.setBusy(retry);
+            if (!ui && !this.opts.json) this.output.writeError(retry(this.output.i18n.t));
             if (this.opts.json) this.output.emit("model.retry", { ...notice });
           },
           onToolProgress: (_callId, message) => {
-            ui?.setBusy(`${activeToolLabel} · ${message.slice(0, 60)}`);
+            const tool = activeToolLabel;
+            ui?.setBusy((t) => `${tool || t("runtime.tool")} · ${message.slice(0, 60)}`);
           },
           onToolStart: (callId, name, args) => {
             if (!ui && !this.opts.json && streamedPlainLineOpen) {
@@ -1349,7 +1374,7 @@ export class OmrContext {
             }
             const { displayTool, summary } = summarizeToolCall(name, args);
             activeToolLabel = displayTool;
-            ui?.setBusy(this.output.i18n.t("runtime.toolRunning", { tool: displayTool }));
+            ui?.setBusy((t) => t("runtime.toolRunning", { tool: displayTool }));
             ui?.toolStart(callId, name, args);
             if (!this.opts.json && !ui) {
               this.output.write(
@@ -1396,7 +1421,7 @@ export class OmrContext {
               });
             }
           },
-          onStep: (step) => ui?.setBusy(this.output.i18n.t("runtime.step", { step })),
+          onStep: (step) => ui?.setBusy((t) => t("runtime.step", { step })),
           onUsage: (_turnUsage, totalTokens) =>
             ui?.setStatus({ tokens: totalTokens }),
         },

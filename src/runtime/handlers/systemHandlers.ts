@@ -1382,7 +1382,7 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
     }
     const inlinePrompt = tokens.slice(cursor).join(" ").trim();
 
-    ctx.output.ui?.setBusy(ctx.output.i18n.t("commandResult.screenshot", { mode }));
+    ctx.output.ui?.setBusy((t) => t("commandResult.screenshot", { mode }));
     let shot;
     try {
       shot = await captureScreenshot({

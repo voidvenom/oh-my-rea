@@ -4,12 +4,13 @@
 Used by bench/startup.mjs to measure terminal startup (alt-screen enter,
 first paint, typed-key echo, transcript visible) of the interactive TUI.
 
-usage: pty-probe.py [--type TEXT] [--type-delay-ms N] [--mark NAME=TEXT]...
+usage: pty-probe.py [--type TEXT] [--type-delay-ms N] [--mark NAME=TEXT]... [--send-on NAME]...
                     [--after-alt] [--send-after-alt TEXT] [--dump FILE] [--stop-on NAME] [--timeout S] [--profile-out FILE] -- cmd args...
 
 Prints one JSON object: {"marks": {name: ms-since-spawn | null}, "firstByteMs": ..., "altScreenMs": ...,
 "exit": ..., "bytes": ...}. `--type` writes TEXT to the terminal right after spawn
 (+ --type-delay-ms), which is how an impatient user types before the UI is ready.
+`--send-on` waits until all specified marks have appeared before sending `--type`.
 `--send-after-alt` writes TEXT 50 ms after the alternate screen appears (a user pressing Enter as soon as
 the UI shows up).
 The probe passes its environment through to the child. Callers matching translated output must
@@ -29,6 +30,7 @@ def value_after(opts, i):
 def main() -> int:
     dump_path = None
     send_after_alt = None
+    send_on = []
     send_at = None
     argv = sys.argv[1:]
     if "--" not in argv:
@@ -60,6 +62,8 @@ def main() -> int:
         elif flag == "--mark":
             name, _, text = value.partition("=")
             marks[name] = text.encode()
+        elif flag == "--send-on":
+            send_on.append(value)
         elif flag == "--stop-on":
             stop_on = value
         elif flag == "--timeout":
@@ -86,7 +90,7 @@ def main() -> int:
         if send_after_alt and send_at is not None and now >= send_at:
             os.write(fd, send_after_alt)
             send_after_alt = None
-        if not sent and now >= type_delay:
+        if not sent and now >= type_delay and all(found[name] is not None for name in send_on):
             os.write(fd, typed)
             sent = True
         ready, _, _ = select.select([fd], [], [], 0.002)

@@ -699,7 +699,7 @@ export const registerWorkflowHandlers = (registry: CommandRegistry): void => {
     }
 
     ctx.output.ui?.setBusy(
-      ctx.output.i18n.t("workflow.subagentRunning", { workflow: workflow ? ` (/${workflow})` : "" }),
+      (t) => t("workflow.subagentRunning", { workflow: workflow ? ` (/${workflow})` : "" }),
     );
     try {
       const result = await ctx.subagentRunner.runTask({
@@ -744,7 +744,7 @@ export const registerWorkflowHandlers = (registry: CommandRegistry): void => {
       ctx.output.fail(ctx.output.i18n.t("common.usage", { command: "/steer [--bg] <sub-id> <correction_prompt>" }));
       return;
     }
-    ctx.output.ui?.setBusy(ctx.output.i18n.t("workflow.steering", { id: agentId }));
+    ctx.output.ui?.setBusy((t) => t("workflow.steering", { id: agentId }));
     try {
       const steered = await ctx.subagentRunner.steer(agentId, prompt, {
         wait: !background,
@@ -824,7 +824,7 @@ export const registerWorkflowHandlers = (registry: CommandRegistry): void => {
 
     if (sub === "wait") {
       const ids = tokens.slice(1).filter(Boolean);
-      ctx.output.ui?.setBusy(ctx.output.i18n.t("workflow.waiting"));
+      ctx.output.ui?.setBusy((t) => t("workflow.waiting"));
       try {
         const results = await ctx.subagentRunner.waitFor(
           ids.length > 0 ? ids : undefined,
