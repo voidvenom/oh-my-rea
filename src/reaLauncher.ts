@@ -1,24 +1,18 @@
-import { accessSync, constants, existsSync, statSync } from "node:fs";
-import { delimiter, resolve } from "node:path";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { envValue, findOnPath, hostPath, type Invocation } from "./platform.js";
 
-/** Search PATH without executing the program. */
-export const findOnPath = (name: string, env: NodeJS.ProcessEnv = process.env): string | undefined => {
-  const extensions = process.platform === "win32" ? ["", ...(env["PATHEXT"] ?? ".EXE;.CMD;.BAT").split(";")] : [""];
-  for (const dir of (env["PATH"] ?? "").split(delimiter)) {
-    if (!dir) continue;
-    for (const extension of extensions) {
-      const candidate = resolve(dir, `${name}${extension}`);
-      try {
-        if (!statSync(candidate).isFile()) continue;
-        accessSync(candidate, constants.X_OK);
-        return candidate;
-      } catch {
-        // Keep walking PATH.
-      }
-    }
-  }
-  return undefined;
+export { findOnPath } from "./platform.js";
+
+/** npm's REA .cmd shim points to this package entry. Resolve it without invoking cmd.exe. */
+export const reaInvocation = (launcher: string, args: readonly string[], platform = process.platform,
+  node = process.execPath, exists = existsSync): Invocation | undefined => {
+  const path = hostPath(platform);
+  if (/\.(?:mjs|cjs|js)$/i.test(launcher)) return { command: node, args: [launcher, ...args] };
+  if (platform !== "win32" || !/\.(?:cmd|bat)$/i.test(launcher)) return { command: launcher, args: [...args] };
+  if (!/^rea(?:-agents)?\.cmd$/i.test(path.basename(launcher))) return undefined;
+  const entry = path.join(path.dirname(launcher), "node_modules", "rea-agents", "scripts", "rea.mjs");
+  return exists(entry) ? { command: node, args: [entry, ...args] } : undefined;
 };
 
 const checkoutCandidates = [
@@ -28,8 +22,9 @@ const checkoutCandidates = [
 
 /** Setup, update checks and MCP use the same launcher order. */
 export const resolveReaLauncher = (env: NodeJS.ProcessEnv) => {
-  const override = env["OMR_REA_COMMAND"];
-  if (override) return { path: override, source: "env" as const };
+  const override = envValue(env, "OMR_REA_COMMAND");
+  if (override) return { path: process.platform === "win32" && !hostPath().isAbsolute(override)
+    ? findOnPath(override, env) ?? override : override, source: "env" as const };
   const checkout = checkoutCandidates.find(candidate => existsSync(candidate));
   if (checkout) return { path: checkout, source: "checkout" as const };
   const installed = findOnPath("rea", env);

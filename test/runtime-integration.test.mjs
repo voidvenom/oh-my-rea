@@ -153,11 +153,11 @@ describe("End-to-end runtime integration via FakeRea & FakeModel", () => {
       assert.deepEqual(parseBangLine("!!"), { kind: "inspect" });
       assert.deepEqual(parseBangLine("!!clear"), { kind: "clear" });
 
-      const outcome = await runBangCommand("printf 'alpha-beta-777\\n'", {
+      const outcome = await runBangCommand("echo alpha-beta-777", {
         cwd: tmp,
       });
       assert.equal(outcome.exitCode, 0);
-      assert.equal(outcome.stdout, "alpha-beta-777\n");
+      assert.equal(outcome.stdout.replace(/\r\n/g, "\n"), "alpha-beta-777\n");
 
       const stagedContext = formatStagedBangContext([
         toStagedBangEntry(outcome),

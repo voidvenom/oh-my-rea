@@ -1,10 +1,12 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { arch, cpus, loadavg, platform, tmpdir, totalmem } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { fixtureEnvironment } from "../scripts/fixture-environment.mjs";
+import { terminateOwnedProcess } from "../dist/ownedProcess.js";
+import { replaceFile } from "../dist/platformFs.js";
 
 const get = (flag, fallback) => { const index = process.argv.indexOf(flag); return index < 0 ? fallback : process.argv[index + 1]; };
 const samples = Number(get("--samples","10")); if (!Number.isInteger(samples) || samples < 5 || samples > 50) throw new Error("--samples must be 5–50");
@@ -17,7 +19,7 @@ const env = {
 };
 const child = args => new Promise((resolve,reject) => {
   const start = performance.now(); const processChild = spawn(process.execPath,args,{cwd,env,stdio:["ignore","pipe","pipe"],detached:platform()!=="win32"}); let stdout="",stderr="";
-  const stop = () => { try { if (platform()!=="win32") process.kill(-processChild.pid,"SIGKILL"); else processChild.kill("SIGKILL"); } catch {} };
+  const stop = () => { void terminateOwnedProcess(processChild.pid, platform() !== "win32", processChild, 0).catch(() => {}); };
   const timer = setTimeout(stop,60_000); timer.unref();
   processChild.stdout.on("data",chunk=>{stdout+=chunk;if(stdout.length>16_777_216)stop();}); processChild.stderr.on("data",chunk=>{stderr=(stderr+chunk).slice(-65536);});
   processChild.once("error",error=>{clearTimeout(timer);reject(error);}); processChild.once("close",(code,signal)=>{clearTimeout(timer); if(code!==0)reject(new Error(`Benchmark child failed (${code??signal}): ${stderr}`)); else resolve({wallMs:performance.now()-start,stdout,stderr});});
@@ -30,7 +32,7 @@ await walk("src");for(const path of sourcePaths.sort()){fingerprint.update(path.
 const harness=createHash("sha256");for(const path of ["bench/platform.mjs","bench/worker.mjs","bench/memory-probe.cjs","scripts/fixture-environment.mjs"]){harness.update(path);harness.update(await readFile(join(cwd,path)));}
 const report = { schema:"omr-benchmark/v1", status:"running", generatedAt:new Date().toISOString(), sourceFingerprint:fingerprint.digest("hex"),harnessFingerprint:harness.digest("hex"), environment:{node:process.version,platform:platform(),arch:arch(),logicalCpus:cpus().length,totalMemoryBytes:totalmem(),loadAverage:loadavg()}, method:{samples,percentile:"nearest-rank",coldMeaning:"fresh Node process and module cache; OS caches are not flushed",model:"controlled localhost SSE, no external API",memory:"Node process high-water RSS KiB; native child RSS is a Linux /proc sample, not its peak"},raw:{},summary:{} };
 const out=get("--out",null);
-const persist=async()=>{if(out){const path=resolve(out);await writeFile(`${path}.tmp`,`${JSON.stringify(report,null,2)}\n`);await rename(`${path}.tmp`,path);}};
+const persist=async()=>{if(out){const path=resolve(out);await writeFile(`${path}.tmp`,`${JSON.stringify(report,null,2)}\n`);await replaceFile(`${path}.tmp`,path);}};
 try {
   for(const flag of ["--version","--help"]){const rows=[];for(let index=0;index<samples;index++){const run=await child(["--require","./bench/memory-probe.cjs","bin/omr.js",flag]); const resource=JSON.parse(/OMR_BENCH_RESOURCE (.+)/.exec(run.stderr)[1]);rows.push({wallMs:run.wallMs,...resource});}report.raw[`cli${flag}`]=rows;report.summary[`cli${flag}`]={wallMs:stats(rows.map(row=>row.wallMs)),maxRssKiB:stats(rows.map(row=>row.maxRssKiB))};await persist();console.error(`measured CLI ${flag}`);}
   const imports=[];for(let index=0;index<samples;index++)imports.push(await worker("import"));report.raw.runtimeImport=imports;report.summary.runtimeImport={importMs:stats(imports.map(row=>row.importMs)),wallMs:stats(imports.map(row=>row.wallMs)),maxRssKiB:stats(imports.map(row=>row.memory.maxRssKiB))};await persist();console.error("measured runtime import");

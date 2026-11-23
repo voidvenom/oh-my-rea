@@ -5,6 +5,7 @@ import { appendFile, mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promi
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, it } from "node:test";
 
 import {
@@ -296,7 +297,7 @@ describe("CLI args, shell env, and model config resolution", () => {
       "/home/tester",
     );
     assert.equal(out["REA_GHIDRA_INSTALL_DIR"], "/home/tester/tools/ghidra");
-    assert.equal(out["REA_UNBLOB_BIN"], "/home/tester/bin/unblob");
+    assert.equal(out["REA_UNBLOB_BIN"], join("/home/tester", "bin", "unblob"));
     assert.equal(out["KEEP_HASH"], "val#not-comment");
   });
 
@@ -2643,8 +2644,7 @@ describe("Session persistence, resume repair & sticky tool restore", () => {
 
   it("stores snapcompact frames once in a content-addressed asset store and rehydrates them on load", async () => {
     const home = await mkdtemp(join(tmpdir(), "omr-home-"));
-    const priorHome = process.env.HOME;
-    process.env.HOME = home;
+    const sessions = join(home, ".rea", "sessions");
     try {
       const {
         mkdir: mkdirFs,
@@ -2652,7 +2652,7 @@ describe("Session persistence, resume repair & sticky tool restore", () => {
         readFile: readFileFs,
       } = await import("node:fs/promises");
       const id = "2026-11-08T10-00-00-000Z-sample";
-      const dir = join(home, ".rea", "sessions", id);
+      const dir = join(sessions, id);
       await mkdirFs(dir, { recursive: true });
       const info = {
         id,
@@ -2693,7 +2693,7 @@ describe("Session persistence, resume repair & sticky tool restore", () => {
       assert.equal(assets.length, 1);
       assert.match(assets[0], /^[0-9a-f]{64}\.png$/);
 
-      const loaded = await loadSavedSession(id);
+      const loaded = await loadSavedSession(id, undefined, sessions);
       assert.ok(loaded);
       assert.equal(
         loaded.messages.length,
@@ -2706,7 +2706,7 @@ describe("Session persistence, resume repair & sticky tool restore", () => {
 
       // A frame that vanished degrades to the text ledger instead of failing the resume.
       await rm(join(dir, "history-assets", assets[0]));
-      const degraded = await loadSavedSession(id);
+      const degraded = await loadSavedSession(id, undefined, sessions);
       assert.ok(degraded);
       assert.equal(degraded.messages[0].images, undefined);
       assert.match(degraded.messages[0].content, new RegExp(evA));
@@ -2721,14 +2721,12 @@ describe("Session persistence, resume repair & sticky tool restore", () => {
         { mimeType: "image/png", asset: "../../../../etc/passwd" },
       ];
       await writeFile(info.historyPath, JSON.stringify(tampered));
-      const hostile = await loadSavedSession(id);
+      const hostile = await loadSavedSession(id, undefined, sessions);
       assert.ok(hostile);
       assert.equal(hostile.messages[0].images, undefined);
 
-      assert.equal((await listRecentSessions(5)).length, 1);
+      assert.equal((await listRecentSessions(5, undefined, sessions)).length, 1);
     } finally {
-      if (priorHome === undefined) delete process.env.HOME;
-      else process.env.HOME = priorHome;
       await rm(home, { recursive: true, force: true });
     }
   });
@@ -3468,10 +3466,9 @@ describe("omr_run: verified script execution and CDP hardening", () => {
   it("writes and runs a decryptor, returns real output, records the run, and is not treated as read-only", async () => {
     await withScripts(async (broker, dir) => {
       assert.equal(broker.isReadOnly("omr_run", { script: "a.py" }), false);
-      const code =
-        "key = 0x5a\nprint(bytes(b ^ key for b in bytes.fromhex('3f2f3e3b')).decode())\n";
+      const code = "console.log(Buffer.from(Buffer.from('3f2f3e3b', 'hex').map(b => b ^ 0x5a)).toString())";
       const out = await broker.dispatch("omr_run", {
-        script: "decrypt.py",
+        script: "decrypt.mjs",
         code,
       });
       assert.equal(out.isError, false);
@@ -3485,15 +3482,15 @@ describe("omr_run: verified script execution and CDP hardening", () => {
         await readFile(join(dir, ".runs", runs[0]), "utf8"),
       );
       assert.equal(record.exitCode, 0);
-      assert.equal(record.interpreter, "python3");
+      assert.equal(record.interpreter, process.execPath);
     });
   });
 
   it("reports failures honestly: non-zero exit is an error and stderr is returned", async () => {
     await withScripts(async (broker) => {
       const out = await broker.dispatch("omr_run", {
-        script: "boom.py",
-        code: "import sys\nsys.stderr.write('bad key')\nsys.exit(3)\n",
+        script: "boom.mjs",
+        code: "console.error('bad key'); process.exitCode = 3;",
       });
       assert.equal(out.isError, true);
       assert.match(out.text, /exit 3/);
@@ -3506,8 +3503,8 @@ describe("omr_run: verified script execution and CDP hardening", () => {
       process.env.OMR_TEST_SECRET = "s3cr3t-value";
       try {
         const out = await broker.dispatch("omr_run", {
-          script: "env.py",
-          code: "import os\nprint('LEAK' if os.environ.get('OMR_TEST_SECRET') else 'clean')\n",
+          script: "env.mjs",
+          code: "console.log(process.env.OMR_TEST_SECRET ? 'LEAK' : 'clean');",
         });
         assert.match(out.text, /clean/);
         assert.doesNotMatch(out.text, /LEAK|s3cr3t-value/);
@@ -3517,17 +3514,23 @@ describe("omr_run: verified script execution and CDP hardening", () => {
     });
   });
 
-  it("keeps every path inside the session scripts directory, including symlinks", async () => {
+  it("keeps every path inside the session scripts directory, including symlinks when allowed", async (t) => {
     await withScripts(async (broker, dir) => {
       const { symlink } = await import("node:fs/promises");
       const outside = join(tmpdir(), `omr-outside-${process.pid}.py`);
       await writeFile(outside, "print('escaped')\n");
       try {
-        await symlink(outside, join(dir, "link.py"));
+        let links = ["link.py"];
+        try { await symlink(outside, join(dir, "link.py")); }
+        catch (error) {
+          if (process.platform !== "win32" || error.code !== "EPERM") throw error;
+          await t.test("rejects file links that resolve outside the session", { skip: "Windows file symlinks require Developer Mode or elevation" }, () => {});
+          links = [];
+        }
         for (const script of [
           "../x.py",
           outside,
-          "link.py",
+          ...links,
           "sub/../../x.py",
         ]) {
           const out = await broker.dispatch("omr_run", { script });
@@ -3549,8 +3552,8 @@ describe("omr_run: verified script execution and CDP hardening", () => {
   it("kills runaway scripts at the operator deadline, returns partial output and bounds huge output", async () => {
     await withScripts(async (broker) => {
       const slow = await broker.dispatch("omr_run", {
-        script: "slow.py",
-        code: "import sys, time\nprint('before deadline')\nprint('partial diagnostic', file=sys.stderr)\ntime.sleep(30)\n",
+        script: "slow.mjs",
+        code: "console.log('before deadline'); console.error('partial diagnostic'); setTimeout(() => {}, 30_000);",
         wait_s: 5,
       });
       assert.equal(slow.isError, true);
@@ -3559,8 +3562,8 @@ describe("omr_run: verified script execution and CDP hardening", () => {
       assert.match(slow.text, /partial diagnostic/);
 
       const big = await broker.dispatch("omr_run", {
-        script: "big.py",
-        code: "print('A' * 300000)\n",
+        script: "big.mjs",
+        code: "console.log('A'.repeat(300000));",
       });
       assert.equal(big.isError, false);
       assert.match(big.text, /omr dropped \d+ bytes/);
@@ -5123,8 +5126,9 @@ describe("Vision, Chat Image Attachment, Multi-Source Screenshots, @file/@image 
     assert.match(firstBlock.text, /vision fallback for text-only endpoint/);
 
     // OSC 8 hyperlink helper
-    const link = osc8FileLink("/tmp/chart.png", "chart.png");
-    assert.match(link, /\x1b\]8;;file:\/\/\/tmp\/chart\.png\x07chart\.png\x1b\]8;;\x07/);
+    const image = join(tmpdir(), "chart.png");
+    const link = osc8FileLink(image, "chart.png");
+    assert.equal(link, `\x1b]8;;${pathToFileURL(image).href}\x07chart.png\x1b]8;;\x07`);
     assert.equal(isImageFilePath("screenshot.webp"), true);
     assert.equal(isImageFilePath("notes.txt"), false);
   });

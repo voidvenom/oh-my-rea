@@ -6,6 +6,7 @@ import { join } from "node:path";
 import type { ChatMessage } from "./model.js";
 import { asArray, asRecord, asString } from "./values.js";
 import { ConcurrencyLimiter } from "./concurrency.js";
+import { canSyncDirectory } from "./platformFs.js";
 
 export interface ExecutionEvent {
   readonly schema: 1;
@@ -216,7 +217,7 @@ export class ExecutionStore {
       const file = await open(this.path, "a", 0o600);
       try { await file.writeFile(`${JSON.stringify(event)}\n`); await file.sync(); }
       finally { await file.close(); }
-      if (this.sequence === 0) {
+      if (this.sequence === 0 && canSyncDirectory()) {
         const directory = await open(this.directory, "r");
         try { await directory.sync(); } finally { await directory.close(); }
       }

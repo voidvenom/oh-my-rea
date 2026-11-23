@@ -3,11 +3,11 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
-  renameSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
+import { reaConfigPath } from "./platform.js";
+import { replaceFileSync } from "./platformFs.js";
 import {
   discoverProvidersSync,
   inferProtocolFromUrl,
@@ -147,11 +147,7 @@ export interface ModelConfigInfo {
 const CONFIG_NAME = "omr-model.json";
 
 export const modelConfigPath = (env: NodeJS.ProcessEnv = process.env): string =>
-  join(
-    env["XDG_CONFIG_HOME"] ?? join(homedir(), ".config"),
-    "rea",
-    CONFIG_NAME,
-  );
+  reaConfigPath(env, [CONFIG_NAME]);
 
 export const readStoredModelConfig = (
   env: NodeJS.ProcessEnv = process.env,
@@ -617,7 +613,7 @@ export const saveDefaultModelConfig = (
   // Write-then-rename so a crash mid-write can never leave a truncated config behind.
   const staging = `${path}.${process.pid}.tmp`;
   writeFileSync(staging, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
-  renameSync(staging, path);
+  replaceFileSync(staging, path);
   return { path, backupPath };
 };
 
@@ -641,7 +637,7 @@ export const saveReasoningEffortDefault = (
     `${JSON.stringify({ ...existing, reasoning_effort: effort }, null, 2)}\n`,
     { mode: 0o600 },
   );
-  renameSync(staging, path);
+  replaceFileSync(staging, path);
   return path;
 };
 
@@ -697,6 +693,6 @@ export const saveModelRuntimeSettings = (
 
   const staging = `${path}.${process.pid}.tmp`;
   writeFileSync(staging, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
-  renameSync(staging, path);
+  replaceFileSync(staging, path);
   return { path, backupPath };
 };

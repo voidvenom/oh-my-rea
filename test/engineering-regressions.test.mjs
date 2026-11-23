@@ -141,12 +141,13 @@ describe("B11: concurrent journal readers share one incremental pass", () => {
 });
 
 describe("B01: script publication preserves files outside the session", () => {
-  it("rejects a symlink before writing its existing external target", async () => {
+  it("rejects a symlink before writing its existing external target", async (t) => {
     await withScratch(async ({ root, scriptsDir }) => {
       const outside = join(root, "outside.mjs");
       const original = "console.log('original');\n";
       await writeFile(outside, original);
-      await symlink(outside, join(scriptsDir, "decoder.mjs"));
+      try { await symlink(outside, join(scriptsDir, "decoder.mjs")); }
+      catch (error) { if (process.platform === "win32" && error.code === "EPERM") return t.skip("Windows file symlinks require Developer Mode or elevation"); throw error; }
       const result = await runSessionScript({
         scriptsDir,
         script: "decoder.mjs",
@@ -158,10 +159,11 @@ describe("B01: script publication preserves files outside the session", () => {
     });
   });
 
-  it("does not create an external target through a dangling symlink", async () => {
+  it("does not create an external target through a dangling symlink", async (t) => {
     await withScratch(async ({ root, scriptsDir }) => {
       const outside = join(root, "absent.mjs");
-      await symlink(outside, join(scriptsDir, "decoder.mjs"));
+      try { await symlink(outside, join(scriptsDir, "decoder.mjs"), "file"); }
+      catch (error) { if (process.platform === "win32" && error.code === "EPERM") return t.skip("Windows file symlinks require Developer Mode or elevation"); throw error; }
       const result = await runSessionScript({ scriptsDir, script: "decoder.mjs", code: "console.log(42);" });
       assert.ok("error" in result);
       await assert.rejects(lstat(outside), { code: "ENOENT" });

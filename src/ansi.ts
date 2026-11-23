@@ -426,13 +426,14 @@ export const createTheme = (
 
   const colorTerm = (env["COLORTERM"] ?? "").toLowerCase();
   const trueColor =
+    Boolean(env["WT_SESSION"]) || env["TERM_PROGRAM"] === "iTerm.app" ||
     colorTerm.includes("truecolor") ||
     colorTerm.includes("24bit") ||
     term.includes("kitty") ||
     term.includes("ghostty") ||
     term.includes("wezterm") ||
     term.includes("alacritty") ||
-    term.includes("256color"); // Modern 256color terminals on Linux/macOS support 24-bit SGR.
+    term.includes("256color") && env["TERM_PROGRAM"] !== "Apple_Terminal";
 
   const rgb = (r: number, g: number, b: number): string =>
     trueColor

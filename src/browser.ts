@@ -2,7 +2,6 @@ import { type ChildProcess, execFile, execFileSync, spawn } from "node:child_pro
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
-import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { ReaCallResult, ReaTool } from "./rea.js";
 import { asRecord, asString } from "./values.js";
@@ -12,6 +11,8 @@ import { BrowserContextStore } from "./browserContext.js";
 import { UncertainInvocationError } from "./execution.js";
 import { resources } from "./resources.js";
 import { signalOwnedProcess, terminateOwnedProcess } from "./ownedProcess.js";
+import { findOnPath, hostHome } from "./platform.js";
+import { desktopBrowserPaths } from "./platformDesktop.js";
 
 export type BrowserEngineId =
   | "camofox"
@@ -422,9 +423,10 @@ export const BROWSER_TOOL_NAMES: readonly string[] = Object.freeze(
 );
 
 /** Discover installed local browsers (`chromium`, `firefox`, `zen`, `chrome`, `brave`). */
-export const discoverInstalledBrowsers = (): InstalledBrowserInfo[] =>
+export const discoverInstalledBrowsers = (env = process.env, platform = process.platform, exists = existsSync): InstalledBrowserInfo[] =>
   BROWSER_CANDIDATES.map((candidate) => {
-    const found = candidate.paths.find((p) => existsSync(p)) ?? null;
+    const paths = platform === "linux" ? candidate.paths : desktopBrowserPaths(candidate.id, env, platform);
+    const found = paths.find(exists) ?? (platform !== "linux" ? findOnPath(candidate.id, env, platform, exists, true) : undefined) ?? null;
     return {
       id: candidate.id,
       name: candidate.name,
@@ -441,7 +443,7 @@ export const resolveCamofoxConfig = (
 ): CamofoxConfig => {
   let ompEnv: Record<string, string> = {};
   let source = "default (127.0.0.1:9377)";
-  const ompMcpPath = join(homedir(), ".omp", "agent", "mcp.json");
+  const ompMcpPath = join(hostHome(env), ".omp", "agent", "mcp.json");
   if (existsSync(ompMcpPath)) {
     try {
       const raw = JSON.parse(readFileSync(ompMcpPath, "utf8")) as unknown;
@@ -491,7 +493,7 @@ export const resolveCamofoxConfig = (
     cookiesDir:
       env["CAMOFOX_COOKIES_DIR"] ||
       ompEnv["CAMOFOX_COOKIES_DIR"] ||
-      join(homedir(), ".camofox", "cookies"),
+      join(hostHome(env), ".camofox", "cookies"),
     source,
   };
 };
@@ -571,7 +573,7 @@ export const probeTorStatus = async (
     proxyUrl: "socks5h://127.0.0.1:9050",
     port: 9050,
     source:
-      "inactive (start with `sudo systemctl start tor` or set OMR_TOR_PROXY)",
+      process.platform === "linux" ? "inactive (start with `sudo systemctl start tor` or set OMR_TOR_PROXY)" : "inactive (start Tor or set OMR_TOR_PROXY)",
   };
 };
 
@@ -903,7 +905,7 @@ export class BrowserManager {
             : null,
       camofox,
       tor,
-      installed: discoverInstalledBrowsers(),
+      installed: discoverInstalledBrowsers(this.env),
       activeLocal: this.activeLocal,
       camofoxRouting: this.camofoxRouting(),
     };
@@ -963,7 +965,7 @@ export class BrowserManager {
 
   private async launchLocalBrowserAdmitted(options: LaunchBrowserOptions, signal: AbortSignal): Promise<RunningLocalBrowser> {
     signal?.throwIfAborted();
-    const installed = discoverInstalledBrowsers();
+    const installed = discoverInstalledBrowsers(this.env);
     const requestedEngine =
       options.engine ??
       (this.preferredEngine !== "camofox" ? this.preferredEngine : "chromium");
@@ -1035,6 +1037,7 @@ export class BrowserManager {
     try { child = spawn(targetInfo.binary, args, {
       stdio: ["ignore", "ignore", "pipe"],
       detached: process.platform !== "win32",
+      windowsHide: headless,
       env: { ...this.env },
     }); } catch (error) {release();throw error;}
     this.activeChild = child;
@@ -1046,7 +1049,10 @@ export class BrowserManager {
     child.once("error", (error) => { spawnError = error; void closeOwned().catch(() => {}); });
     // Drain stderr so a verbose child cannot block startup on a full pipe.
     child.stderr?.resume();
-    const onAbort = (): void => { signalOwnedProcess(child.pid, process.platform !== "win32", "SIGTERM"); };
+    const onAbort = (): void => {
+      if (process.platform === "win32") void closeOwned().catch(() => {});
+      else signalOwnedProcess(child.pid, true, "SIGTERM");
+    };
     signal?.addEventListener("abort", onAbort, { once: true });
     try {
       const deadline = Date.now() + 4_000;

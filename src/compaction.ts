@@ -2,12 +2,12 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
-  renameSync,
   writeFileSync,
 } from "node:fs";
 import { dirname } from "node:path";
 import type { ChatMessage } from "./model.js";
 import { modelConfigPath, readStoredModelConfig } from "./modelConfig.js";
+import { replaceFileSync } from "./platformFs.js";
 import { asNumber, asString } from "./values.js";
 
 /**
@@ -271,7 +271,7 @@ export const persistCompactionSettings = (
   else delete next["compaction_remote_endpoint"];
   const staging = `${path}.${process.pid}.tmp`;
   writeFileSync(staging, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
-  renameSync(staging, path);
+  replaceFileSync(staging, path);
   return { path, backupPath };
 };
 

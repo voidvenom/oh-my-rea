@@ -94,9 +94,9 @@ describe("R2: execution trace is integrated with the actual runtime", () => {
       ctx.browserManager.ensureCamofoxRunning=async()=>({reachable:true});
       await ctx.runTurn("inspect fixture","fixture");
       await ctx.rea.call("search_strings",{query:"fixture"});
-      const script=await ctx.broker.dispatch("omr_run",{script:"trace.py",code:"print('trace-ok')"});
+      const script=await ctx.broker.dispatch("omr_run",{script:"trace.mjs",code:"console.log('trace-ok')"});
       assert.equal(script.isError,false,script.text);
-      await ctx.executeBangLine("!printf trace-shell");
+      await ctx.executeBangLine("!echo trace-shell");
       assert.equal((await ctx.browserManager.call("camofox_list_tabs",{})).isError,false);
       const events=[];for await (const event of readExecutionEvents(ctx.runtime.events.path)) events.push(event);
       assert.ok(events.some(e=>e.type==="model.request"));assert.ok(events.some(e=>e.type==="model.result"));

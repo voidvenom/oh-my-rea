@@ -32,6 +32,10 @@ import { fixtureEnvironment } from "../scripts/fixture-environment.mjs";
 import { writeSessionStore } from "./startup-fixture.mjs";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
+if (process.platform === "win32") {
+  process.stderr.write("bench:startup requires Python's POSIX PTY (Linux/macOS or WSL); the probe does not use Windows ConPTY.\n");
+  process.exit(2);
+}
 const get = (flag, fallback) => {
   const index = process.argv.indexOf(flag);
   return index < 0 ? fallback : process.argv[index + 1];
@@ -54,7 +58,8 @@ const round = (value) => (value === null ? null : Math.round(value));
 
 const python = spawnSync("python3", ["--version"], { encoding: "utf8" });
 if (python.status !== 0) throw new Error("python3 is required for the pty probe");
-const rea = process.env.OMR_REA_COMMAND ? "OMR_REA_COMMAND" : spawnSync("sh", ["-c", "command -v rea"], { encoding: "utf8" }).stdout.trim();
+const { resolveReaLauncher } = await import("../dist/reaLauncher.js");
+const rea = resolveReaLauncher(process.env)?.path;
 if (!rea) throw new Error("`rea` is not on PATH (install rea-agents or set OMR_REA_COMMAND); REA start-up is part of the measurement");
 
 const root = await mkdtemp(join(tmpdir(), "omr-startup-bench-"));

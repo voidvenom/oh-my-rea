@@ -46,13 +46,13 @@ describe("process-global physical backend admission",()=>{
       await one.close();two=await opening;assert.equal(resources.snapshot().mcpProcess.active,1);await two.close();assert.equal(resources.snapshot().mcpProcess.active,0);
     }finally{await one?.close();await two?.close();configureResourceLimits(DEFAULT_RESOURCE_LIMITS);await rm(root,{recursive:true,force:true});}
   });
-  it("kills owned MCP descendants that ignore TERM before releasing process capacity",{skip:!sessionLauncher()},async()=>{
+  it("kills owned MCP descendants that ignore TERM before releasing process capacity",{skip:!sessionLauncher() && "requires Linux setsid and /proc process status"},async()=>{
     const root=await mkdtemp(join(tmpdir(),"omr-rea-descendant-"));let rea;
     const live=async pid=>{try{return!/^\S+ \(.+\) Z /.test(await readFile(`/proc/${pid}/stat`,"utf8"));}catch{return false;}};
     try{const pidFile=join(root,"child.pid");rea=await Rea.connect(root,{PATH:process.env.PATH,OMR_REA_COMMAND:fixture,OMR_FIXTURE_MODE:"normal-descendant",OMR_FIXTURE_DESC_PID_FILE:pidFile},[]);const pid=Number(await readFile(pidFile,"utf8"));await delay(50);assert.equal(await live(pid),true);await rea.close();await until(async()=>!await live(pid));assert.equal(resources.snapshot().mcpProcess.active,0);}
     finally{await rea?.close();await rm(root,{recursive:true,force:true});}
   });
-  it("reaps background descendants after normal script and shell parent exit",{skip:process.platform!=="linux"},async()=>{
+  it("reaps background descendants after normal script and shell parent exit",{skip:process.platform!=="linux" && "requires Linux /proc process status and POSIX group ownership"},async()=>{
     const root=await mkdtemp(join(tmpdir(),"omr-run-descendant-"));
     const code="import{spawn}from'node:child_process';import{writeFileSync}from'node:fs';const c=spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{});setInterval(()=>{},1000)\"],{stdio:'ignore'});writeFileSync(process.argv[2],String(c.pid));c.unref();";
     const alive=async pid=>{try{return!/^\S+ \(.+\) Z /.test(await readFile(`/proc/${pid}/stat`,"utf8"));}catch{return false;}};

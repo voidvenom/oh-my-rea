@@ -2,18 +2,19 @@ import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { resources } from "./resources.js";
 import { terminateOwnedProcess } from "./ownedProcess.js";
+import { envValue, invalidWindowsFilename } from "./platform.js";
+import { replaceFileSync } from "./platformFs.js";
+import { interpreterFor, supportsNetworkNamespace } from "./scriptPlatform.js";
 import {
   lstatSync,
   mkdirSync,
   createReadStream,
   realpathSync,
-  renameSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import {
   basename,
-  extname,
   join,
   relative,
   resolve,
@@ -70,38 +71,6 @@ export interface RunOutcome {
 export type RunFailure = { readonly ok: false; readonly error: string };
 export type RunProgress = Pick<RunOutcome, "stdout" | "stderr" | "droppedBytes" | "durationMs">;
 
-interface Interpreter {
-  readonly command: string;
-  readonly leadingArgs: readonly string[];
-}
-
-/** Extension → interpreter. `.js` is deliberately absent: omr's `.js` artifacts are Frida scripts. */
-const interpreterFor = (file: string): Interpreter | RunFailure => {
-  switch (extname(file).toLowerCase()) {
-    case ".py":
-      return { command: "python3", leadingArgs: ["-B", "-u"] };
-    case ".sh":
-      return { command: "bash", leadingArgs: [] };
-    case ".mjs":
-    case ".cjs":
-      return { command: "node", leadingArgs: [] };
-    case ".yar":
-    case ".yara":
-      return { command: "yara", leadingArgs: ["-w"] };
-    case ".js":
-      return {
-        ok: false,
-        error:
-          "`.js` files in the session are Frida scripts, which need a Frida runtime rather than Node. " +
-          "Load them with instrument_with_frida / load_frida_script, or save plain Node code as `.mjs`/`.cjs` to run it here.",
-      };
-    default:
-      return {
-        ok: false,
-        error: `No interpreter mapped for "${extname(file) || file}". Supported: .py (python3), .sh (bash), .mjs/.cjs (node), .yar/.yara (yara).`,
-      };
-  }
-};
 
 /**
  * Resolve `script` strictly inside `scriptsDir` (symlinks included). The model names the file, so a
@@ -127,6 +96,9 @@ export const resolveSessionScript = (
       error: `Session scripts directory is not available: ${scriptsDir}`,
     };
   }
+  if (process.platform === "win32" && name.split(/[/\\]/).some(part => part !== "." && part !== ".." && invalidWindowsFilename(part))) {
+    return { ok: false, error: `Invalid Windows script path: ${name}` };
+  }
   const candidate = resolve(root, name);
   let real: string;
   try {
@@ -138,7 +110,7 @@ export const resolveSessionScript = (
     };
   }
   const rel = relative(root, real);
-  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
+  if (rel === "" || rel === ".." || rel.startsWith("../") || (process.platform === "win32" && rel.startsWith("..\\")) || isAbsolute(rel)) {
     return {
       ok: false,
       error: `Script must live inside the session scripts directory (${root}): ${name}`,
@@ -157,7 +129,7 @@ const saveSessionScript = (
   code: string,
 ): RunFailure | null => {
   const clean = name.trim();
-  if (!SCRIPT_NAME_RE.test(clean)) {
+  if (!SCRIPT_NAME_RE.test(clean) || (process.platform === "win32" && invalidWindowsFilename(clean))) {
     return {
       ok: false,
       error: `With \`code\`, \`script\` must be a plain file name such as decrypt.py (got "${name}").`,
@@ -188,7 +160,7 @@ const saveSessionScript = (
     // destination symlink (even one swapped in after lstat) or modifies another hardlink.
     staging = join(root, `.omr-write-${randomUUID()}.tmp`);
     writeFileSync(staging, code, { flag: "wx", mode: 0o600 });
-    renameSync(staging, destination);
+    replaceFileSync(staging, destination);
     staging = null;
   } catch (error) {
     return {
@@ -211,7 +183,7 @@ let netnsProbe: Promise<boolean> | undefined;
 
 /** Whether an unprivileged empty network namespace (`unshare -rn`) is available on this host. */
 export const networkIsolationAvailable = (): Promise<boolean> =>
-  netnsProbe ??= new Promise((resolve) => {
+  !supportsNetworkNamespace() ? Promise.resolve(false) : netnsProbe ??= new Promise((resolve) => {
     const probe = spawn("unshare", ["-rn", "true"], { stdio: "ignore" });
     const timer = setTimeout(() => {
       probe.kill("SIGKILL");
@@ -235,17 +207,19 @@ export const resetNetworkIsolationProbe = (): void => {
  * is never inherited: a script written from target-derived content must not be able to read or
  * forward it.
  */
-export const scrubbedEnv = (scriptsDir: string): NodeJS.ProcessEnv => {
+export const scrubbedEnv = (scriptsDir: string, source = process.env, platform = process.platform): NodeJS.ProcessEnv => {
   const env: NodeJS.ProcessEnv = {
-    PATH: process.env["PATH"] ?? "/usr/local/bin:/usr/bin:/bin",
-    LANG: process.env["LANG"] ?? "C.UTF-8",
+    PATH: envValue(source, "PATH", platform) ?? (platform === "win32" ? "" : "/usr/local/bin:/usr/bin:/bin"),
+    LANG: envValue(source, "LANG", platform) ?? "C.UTF-8",
     TERM: "dumb",
     PYTHONDONTWRITEBYTECODE: "1",
     PYTHONIOENCODING: "utf-8",
     OMR_SESSION_SCRIPTS: scriptsDir,
   };
-  const home = process.env["HOME"];
-  if (home) env["HOME"] = home;
+  for (const key of platform === "win32" ? ["USERPROFILE", "SystemRoot", "ComSpec", "PATHEXT", "TEMP", "TMP"] : ["HOME"]) {
+    const value = envValue(source, key, platform);
+    if (value) env[key] = value;
+  }
   return env;
 };
 
@@ -341,7 +315,8 @@ export const runSessionScript = async (
   }
   const resolved = resolveSessionScript(request.scriptsDir, request.script);
   if (typeof resolved !== "string") return resolved;
-  const interpreter = interpreterFor(resolved);
+  const childEnv = scrubbedEnv(request.scriptsDir);
+  const interpreter = interpreterFor(resolved, childEnv);
   if ("error" in interpreter) return interpreter;
 
   const timeoutSec = Math.min(
@@ -389,17 +364,14 @@ export const runSessionScript = async (
   return await resources.run("script", () => new Promise<RunOutcome | RunFailure>((settle) => {
     const child = spawn(command!, commandArgs, {
       cwd: request.scriptsDir,
-      env: scrubbedEnv(request.scriptsDir),
+      env: childEnv,
       stdio: ["pipe", "pipe", "pipe"],
-      detached: true,
+      detached: process.platform !== "win32",
+      windowsHide: true,
     });
-    const killGroup = (): void => {
-      try {
-        if (child.pid) process.kill(-child.pid, "SIGKILL");
-      } catch {
-        child.kill("SIGKILL");
-      }
-    };
+    let cleanup: Promise<void> | undefined;
+    const stop = (): Promise<void> => cleanup ??= terminateOwnedProcess(child.pid, process.platform !== "win32", child, 0);
+    const killGroup = (): void => { void stop().catch(() => {}); };
     const timer = Number.isFinite(timeoutSec) ? setTimeout(() => {
       timedOut = true;
       killGroup();
@@ -422,17 +394,13 @@ export const runSessionScript = async (
       request.signal?.removeEventListener("abort", onAbort);
       settle({
         ok: false,
-        error: `Unable to start ${interpreter.command}: ${error.message}${
-          interpreter.command === "yara"
-            ? " (install the `yara` CLI to compile or scan rules)"
-            : ""
-        }`,
+        error: `Unable to start ${interpreter.command}: ${error.message}`,
       });
     });
     child.once("close", async (exitCode, signal) => {
       clearTimeout(timer);
       request.signal?.removeEventListener("abort", onAbort);
-      try { await terminateOwnedProcess(child.pid, process.platform !== "win32", child, 100); }
+      try { await (cleanup ?? terminateOwnedProcess(child.pid, process.platform !== "win32", child, 100)); }
       catch (error) { settle({ok:false,error:`Script process cleanup failed: ${error instanceof Error ? error.message : String(error)}`});return; }
       const base = {
         ok: exitCode === 0 && !timedOut && !aborted,

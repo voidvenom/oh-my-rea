@@ -871,7 +871,7 @@ export class OmrContext {
     return false;
   }
 
-  async ensureConnected(): Promise<void> {
+  async ensureConnected(reportFailure = true): Promise<void> {
     if (this.readyPromise) return this.readyPromise;
     const runtime = this.runtime;
     this.readyPromise = (async () => {
@@ -986,8 +986,7 @@ export class OmrContext {
       this.readyPromise = null;
       this.booting = false;
       this.output.ui?.setBusy(null);
-      const message = errorMessageOf(error);
-      this.output.fail(this.output.i18n.t("runtime.reaFailed", { detail: message }));
+      if (reportFailure) this.output.fail(this.output.i18n.t("runtime.reaFailed", { detail: errorMessageOf(error) }));
       throw error;
     });
     return this.readyPromise;

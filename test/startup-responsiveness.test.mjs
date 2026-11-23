@@ -46,7 +46,7 @@ test("lazy validator compiles a schema only when a result of that tool is first 
   assert.equal(typeof b, "function");
 });
 
-test("REA detection searches PATH instead of running rea, and updateNotice never waits for rea --version", { skip: !posix }, async () => {
+test("REA detection searches PATH instead of running rea, and updateNotice never waits for rea --version", { skip: !posix && "the executable fixture uses a POSIX shebang and chmod" }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "omr-startup-test-"));
   try {
     // Load setup from a fixture checkout so its relative sibling search cannot reach the host's REA.
@@ -54,7 +54,7 @@ test("REA detection searches PATH instead of running rea, and updateNotice never
     const dist = join(omr, "dist");
     await mkdir(dist, { recursive: true });
     await writeFile(join(omr, "package.json"), '{"type":"module"}');
-    for (const name of ["ansi.js", "env.js", "setup.js", "reaLauncher.js", "version.js"]) {
+    for (const name of ["ansi.js", "env.js", "setup.js", "reaLauncher.js", "platform.js", "platformFs.js", "version.js"]) {
       await copyFile(new URL(`../dist/${name}`, import.meta.url), join(dist, name));
     }
     await cp(new URL("../dist/i18n/", import.meta.url), join(dist, "i18n"), { recursive: true });

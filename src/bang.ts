@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { resources } from "./resources.js";
-import { terminateOwnedProcess } from "./ownedProcess.js";
+import { signalOwnedProcess, terminateOwnedProcess } from "./ownedProcess.js";
+import { operatorShell } from "./scriptPlatform.js";
 
 export const BANG_TIMEOUT_MS = 30_000;
 export const BANG_MAX_OUTPUT_BYTES = 64 * 1024;
@@ -60,11 +61,12 @@ export const runBangCommand = (
   resources.run("shell", () => new Promise<BangRunOutcome>((resolve) => {
     const started = performance.now();
     const timeoutMs = Math.max(500, options.timeoutMs ?? BANG_TIMEOUT_MS);
-    const child = spawn("/bin/sh", ["-c", command], {
-      cwd: options.cwd,
-      env: options.env ?? process.env,
-      stdio: ["ignore", "pipe", "pipe"],
-      detached: true,
+    const env = options.env ?? process.env;
+    const shell = operatorShell(command, env);
+    const group = process.platform !== "win32";
+    const child = spawn(shell.command, shell.args, {
+      cwd: options.cwd, env, stdio: ["ignore", "pipe", "pipe"], detached: group,
+      windowsHide: true, windowsVerbatimArguments: shell.windowsVerbatimArguments,
     });
 
     const outChunks: Buffer[] = [];
@@ -75,20 +77,18 @@ export const runBangCommand = (
     let timedOut = false;
     let escalationTimer: ReturnType<typeof setTimeout> | undefined;
 
-    const killGroup = (sig: NodeJS.Signals): void => {
-      if (child.pid) {
-        try {
-          process.kill(-child.pid, sig);
-          return;
-        } catch {
-          // Fall through to direct child kill.
-        }
+    let cleanup: Promise<void> | undefined;
+    const stop = (): void => {
+      if (!group) {
+        cleanup ??= terminateOwnedProcess(child.pid, false, child);
+        void cleanup.catch(() => {});
+        return;
       }
-      try {
-        child.kill(sig);
-      } catch {
-        // Process already exited.
-      }
+      try { signalOwnedProcess(child.pid, true, "SIGTERM"); } catch { /* already gone */ }
+      escalationTimer ??= setTimeout(() => {
+        try { signalOwnedProcess(child.pid, true, "SIGKILL"); } catch { /* already gone */ }
+      }, 250);
+      escalationTimer.unref();
     };
 
     child.stdout?.on("data", (chunk: Buffer) => {
@@ -117,15 +117,11 @@ export const runBangCommand = (
 
     const timer = setTimeout(() => {
       timedOut = true;
-      killGroup("SIGTERM");
-      escalationTimer = setTimeout(() => killGroup("SIGKILL"), 250);escalationTimer.unref();
+      stop();
     }, timeoutMs);
     timer.unref();
 
-    const onAbort = (): void => {
-      killGroup("SIGTERM");
-      escalationTimer = setTimeout(() => killGroup("SIGKILL"), 250);escalationTimer.unref();
-    };
+    const onAbort = stop;
     options.signal?.addEventListener("abort", onAbort, { once: true });
     if (options.signal?.aborted) onAbort();
 
@@ -134,7 +130,7 @@ export const runBangCommand = (
       if (finished) return; finished = true;
       clearTimeout(timer);
       options.signal?.removeEventListener("abort", onAbort);
-      try {await terminateOwnedProcess(child.pid, process.platform !== "win32", child, 100);}
+      try { await (cleanup ?? terminateOwnedProcess(child.pid, group, child, 100)); }
       catch (error) {errChunks.push(Buffer.from(`Process cleanup failed: ${String(error)}`));exitCode=127;}
       clearTimeout(escalationTimer);
       resolve({

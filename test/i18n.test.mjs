@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { padEndAnsi, stripAnsi, truncateAnsi, visibleWidth } from "../dist/ansi.js";
 import { COMMANDS } from "../dist/commands.js";
@@ -107,7 +107,8 @@ test("the CLI loads only its selected catalog, saves language additively and pre
       if (language === null) delete env.OMR_LANG; // Exercise the saved setting rather than an override.
       return run(process.execPath, [...extra, cli, ...args], { cwd: root, env });
     };
-    const help = await invoke(["--lang", "tr", "--help"], ["--import", loader]);
+    const preload = ["--import", pathToFileURL(loader).href];
+    const help = await invoke(["--lang", "tr", "--help"], preload);
     assert.equal(help.stderr, "catalog: tr\n");
     assert.match(help.stdout, /Kullanım:/);
     assert.match(help.stdout, /\/lang \[en\|tr\].*Kayıtlı arayüz dilini göster veya değiştir/);
@@ -124,7 +125,7 @@ test("the CLI loads only its selected catalog, saves language additively and pre
     assert.equal(await readFile(`${config}.bak`, "utf8"), previous);
     assert.match((await invoke(["--help"], [], null)).stdout, /Kullanım:/);
     assert.match((await invoke(["--help", "--lang=en"], [], "tr")).stdout, /Usage:/);
-    const missing = (lang) => invoke(["--json", "--no-model", "/missing-command"], ["--import", loader], lang)
+    const missing = (lang) => invoke(["--json", "--no-model", "/missing-command"], preload, lang)
       .then(() => assert.fail("unknown command must fail"), (error) => {
         assert.equal(error.code, 1);
         assert.equal(error.stderr, "catalog: en\n");
@@ -145,7 +146,7 @@ test("the CLI loads only its selected catalog, saves language additively and pre
 });
 
 test("a Turkish-locale PTY paints its splash immediately and /lang persists across restarts", {
-  skip: process.platform === "win32",
+  skip: process.platform === "win32" && "Python pty.fork requires POSIX; native Windows uses ConPTY",
 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "omr-lang-pty-"));
   try {
@@ -189,7 +190,7 @@ test("a Turkish-locale PTY paints its splash immediately and /lang persists acro
 });
 
 test("/lang repaints the running startup activity and startup notices in both directions", {
-  skip: process.platform === "win32",
+  skip: process.platform === "win32" && "Python pty.fork requires POSIX; native Windows uses ConPTY",
 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "omr-lang-live-"));
   try {

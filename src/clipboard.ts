@@ -6,6 +6,8 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { extname, isAbsolute, join, resolve } from "node:path";
 import type { ChatImageBlock } from "./model.js";
+import { localFilePath } from "./platform.js";
+import { windowsClipboardWrite } from "./platformDesktop.js";
 
 export interface ClipboardImageAttachment {
   readonly id: number;
@@ -350,14 +352,8 @@ export const tryLoadImageFromPathText = (
 ): RawClipboardImage | null => {
   const trimmed = rawText.trim().replace(/^['"]|['"]$/g, "");
   if (!trimmed || trimmed.includes("\n")) return null;
-  let candidate = trimmed;
-  if (candidate.startsWith("file://")) {
-    try {
-      candidate = decodeURIComponent(new URL(candidate).pathname);
-    } catch {
-      candidate = candidate.slice("file://".length);
-    }
-  }
+  let candidate: string;
+  try { candidate = localFilePath(trimmed); } catch { return null; }
   const ext = extname(candidate).toLowerCase();
   const expectedMime = IMAGE_EXTENSIONS[ext];
   if (!expectedMime) return null;
@@ -807,10 +803,15 @@ export const copyTextToClipboard = async (
       );
       if (okKlipper !== null) copied = true;
     }
+    if (!copied && process.env["WSL_DISTRO_NAME"]) {
+      const { command, args, input } = windowsClipboardWrite(text);
+      copied = (await execCaptureBuffer(command, args, { input })) !== null;
+    }
     return copied || Boolean(writeOsc);
   }
-  if (process.platform === "win32" || process.env["WSL_DISTRO_NAME"]) {
-    const ok = await execFireAndForget("clip.exe", [], text);
+  if (process.platform === "win32") {
+    const { command, args, input } = windowsClipboardWrite(text);
+    const ok = (await execCaptureBuffer(command, args, { input })) !== null;
     return ok || copiedNatively || Boolean(writeOsc);
   }
   return copiedNatively || Boolean(writeOsc);

@@ -9,17 +9,19 @@
 let listener: ((chunk: string | Buffer) => void) | null = null;
 let buffered: string[] = [];
 
-/** Puts a TTY stdin in raw mode and buffers what is typed. No-op when stdin is not a TTY. */
-export const beginEarlyInput = (): void => {
-  if (listener || !process.stdin.isTTY) return;
+/** Buffers typed-ahead input if the terminal is able to enter raw mode. */
+export const beginEarlyInput = (stdin = process.stdin): boolean => {
+  if (listener) return true;
+  if (!stdin.isTTY) return false;
+  try { stdin.setRawMode(true); } catch { return false; }
   buffered = [];
   listener = (chunk) => {
     buffered.push(typeof chunk === "string" ? chunk : chunk.toString("utf8"));
   };
-  process.stdin.setRawMode(true);
-  process.stdin.setEncoding("utf8"); // multi-byte characters split across reads are reassembled
-  process.stdin.on("data", listener);
-  process.stdin.resume();
+  stdin.setEncoding("utf8"); // multi-byte characters split across reads are reassembled
+  stdin.on("data", listener);
+  stdin.resume();
+  return true;
 };
 
 const detach = (): string => {

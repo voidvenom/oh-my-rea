@@ -14,6 +14,7 @@ import {
   runSessionScript,
 } from "./exec.js";
 import { SessionScriptRuns } from "./scriptRuns.js";
+import { scriptInterpreterSummary } from "./scriptPlatform.js";
 import { readGuide, withOperatorPrecedence } from "./guide.js";
 import type { ChatImageBlock, ChatMessage, ToolDefinition } from "./model.js";
 import {
@@ -581,7 +582,7 @@ const META_TOOLS: readonly ToolDefinition[] = Object.freeze([
     function: {
       name: "omr_run",
       description:
-        "Run a verification script from the session scripts directory and read real stdout, stderr and exit status. Pass script and optional code to launch. If the wait window elapses, output so far and a run_id are returned while the script continues. Pass run_id to check it or wait again. Runs with a scrubbed environment and, by default, no network. It never executes the target binary.",
+        "Run a verification script from the session scripts directory and read real stdout, stderr and exit status. Pass script and optional code to launch. If the wait window elapses, output so far and a run_id are returned while the script continues. Pass run_id to check it or wait again. Runs with a scrubbed environment; a Linux network namespace is used by default when available. It never executes the target binary.",
       parameters: {
         type: "object",
         properties: {
@@ -1134,7 +1135,9 @@ export class ReaBroker {
     if (cached) return [...cached, ...local.map(tool => tool.definition)];
     const built = [
       ...selected.map((tool) => this.definitionFor(tool)),
-      ...META_TOOLS,
+      ...META_TOOLS.map(tool => tool.function.name !== "omr_run" ? tool : {
+        ...tool, function: { ...tool.function, description: `${tool.function.description} ${scriptInterpreterSummary()}` },
+      }),
     ];
     if (this.listCache.size > 16) this.listCache.clear();
     this.listCache.set(key, built);

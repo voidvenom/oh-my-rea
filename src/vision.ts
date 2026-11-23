@@ -2,8 +2,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { basename, dirname, extname, join, resolve } from "node:path";
+import { basename, extname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { deflateSync, inflateSync } from "node:zlib";
 import { terminalLink } from "./ansi.js";
@@ -17,6 +16,7 @@ import {
 } from "./clipboard.js";
 import type { ChatImageBlock } from "./model.js";
 import { TARGET_EXTENSIONS, resolveTargetPath } from "./target.js";
+import { completionPath } from "./platform.js";
 
 export type ScreenshotMode =
   | "desktop"
@@ -724,15 +724,7 @@ export const loadImageSource = async (
     }
   }
 
-  let candidate = trimmed;
-  if (candidate.startsWith("file://")) {
-    try {
-      candidate = decodeURIComponent(new URL(candidate).pathname);
-    } catch {
-      candidate = candidate.slice("file://".length);
-    }
-  }
-  const resolved = resolveTargetPath(candidate, cwd);
+  const resolved = resolveTargetPath(trimmed, cwd);
   if (!resolved || !existsSync(resolved)) {
     throw new Error(`Image file not found: ${trimmed}`);
   }
@@ -1339,28 +1331,7 @@ export const completeAtMention = (
   const atIndex = before.lastIndexOf(`@${rawToken}`);
   if (atIndex < 0) return null;
 
-  const clean = rawToken.replace(/^["']/, "");
-  const expanded =
-    clean === "~"
-      ? `${homedir()}/`
-      : clean.startsWith("~/")
-        ? join(homedir(), clean.slice(2))
-        : clean;
-
-  const endsWithSlash =
-    expanded.endsWith("/") || expanded.endsWith("\\") || expanded.length === 0;
-  const searchDir = endsWithSlash
-    ? resolve(cwd, expanded || ".")
-    : resolve(cwd, dirname(expanded));
-  const prefix = endsWithSlash ? "" : basename(expanded).toLowerCase();
-  const displayDirPrefix =
-    clean.length === 0
-      ? ""
-      : endsWithSlash
-        ? clean
-        : clean.includes("/")
-          ? clean.slice(0, clean.lastIndexOf("/") + 1)
-          : "";
+  const { searchDir, prefix, displayDirPrefix } = completionPath(rawToken.replace(/^["']/, ""), cwd);
 
   let entries;
   try {

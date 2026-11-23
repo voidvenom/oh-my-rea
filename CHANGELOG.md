@@ -4,6 +4,17 @@ This project uses the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) f
 
 ## [Unreleased]
 
+### Fixed
+
+- Start npm-installed REA and run `omr setup` and `omr update` on Windows without passing arguments through batch shims. `omr /status` now works even when REA is missing.
+- Use native macOS and Windows config and session locations while retaining existing legacy files and explicit overrides. Retry Windows file replacement when another process briefly holds a file open.
+- Support Windows Python and PowerShell for `omr_run`, report available interpreters, and clean up running Windows child trees on cancellation where the host permits it.
+- Fix Windows drive, UNC and file URL handling, Unicode clipboard copy, and browser discovery on macOS and Windows.
+
+### Changed
+
+- CI checks Linux, macOS and Windows across the supported Node lines, including installation and smoke tests from the npm tarball.
+
 ## [0.7.0] - 2026-11-23
 
 ### Added

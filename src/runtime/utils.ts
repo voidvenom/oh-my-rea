@@ -2,14 +2,14 @@ import type { CompactionReport } from "../agent.js";
 import { formatTokenCountShort } from "../compaction.js";
 import { DEFAULT_TOOL_TIMEOUT_MS } from "../rea.js";
 
-export const splitShellTokens = (input: string): string[] => {
+export const splitShellTokens = (input: string, platform = process.platform): string[] => {
   const tokens: string[] = [];
   let current = "";
   let quote: '"' | "'" | null = null;
   for (let i = 0; i < input.length; i += 1) {
     const ch = input[i]!;
     if (quote) {
-      if (ch === "\\" && quote === '"' && i + 1 < input.length) {
+      if (platform !== "win32" && ch === "\\" && quote === '"' && i + 1 < input.length) {
         current += input[i + 1]!;
         i += 1;
       } else if (ch === quote) {
