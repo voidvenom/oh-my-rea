@@ -32,6 +32,7 @@ import {
   forkSession,
   listRecentSessions,
   loadSavedSession,
+  previewSavedSession,
   sessionInfoFromSummary,
   saveCodeBlockToDisk,
   saveSessionHistory,
@@ -617,16 +618,27 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
       ctx.output.commandResult("resume", { sessions: recent }, lines.join("\n"));
       return;
     }
+    if (ctx.activeAbort) { ctx.output.fail("Finish or cancel the active turn before resuming another session"); return; }
+    const ui = ctx.output.ui;
+    const previousHistory = ctx.agent?.history ?? [];
+    const preview = ui ? await previewSavedSession(arg, ctx.session.id, ctx.sessionsRootDir) : null;
+    if (preview) {
+      ui?.hydrateFromHistory(preview.messages);
+      ui?.setBusy("restoring session");
+    }
     const loaded = await loadSavedSession(
       arg,
       ctx.session.id,
       ctx.sessionsRootDir,
     );
     if (!loaded) {
+      if (preview) ui?.hydrateFromHistory(previousHistory);
+      ui?.setBusy(null);
       ctx.output.fail(`no saved session history found matching "${arg}"`);
       return;
     }
-    if (ctx.activeAbort) { ctx.output.fail("Finish or cancel the active turn before resuming another session"); return; }
+    if (!preview || preview.id !== loaded.summary.id) ui?.hydrateFromHistory(loaded.messages);
+    ui?.setBusy("restoring session");
     try {
       const source = sessionInfoFromSummary(loaded.summary);
       const continuation = await forkSession(source, loaded.messages, loaded.summary.target, ctx.modelId, {label: "resume", rootDir: ctx.sessionsRootDir});
@@ -635,6 +647,8 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
       const originalGoal = loaded.messages.find(message => message.role === "user")?.content;
       if (typeof originalGoal === "string") await ctx.runtime.task.initializeGoal(stripInternalPromptNotes(originalGoal));
     } catch (error) {
+      ui?.setBusy(null);
+      ui?.hydrateFromHistory(loaded.messages);
       ctx.output.fail(`resume failed: ${errorMessageOf(error)}`);
       return;
     }
@@ -644,8 +658,10 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
     const resumedTitle = loaded.summary.title || resumedId;
     const resumedShort = loaded.summary.shortId || resumedId;
     let droppedMessages = loaded.droppedMessages;
+    let agentDropped = 0;
     if (ctx.agent) {
-      droppedMessages += ctx.agent.restoreHistory(loaded.messages).droppedMessages;
+      agentDropped = ctx.agent.restoreHistory(loaded.messages).droppedMessages;
+      droppedMessages += agentDropped;
       ctx.broker?.restoreSticky(ctx.agent.history);
       ctx.lastAssistantText =
         [...ctx.agent.history]
@@ -686,11 +702,12 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
         ? `\n${unverifiedEvidence} Evidence ID(s) from source session ${resumedId} are unverified in the active backend; re-run the tool or import an authenticated bundle before building on them.`
         : "";
     const repairNote = droppedMessages > 0 ? `\nDiscarded ${droppedMessages} invalid or incomplete saved message(s).` : "";
-    const bannerText = `resumed session **#${loaded.summary.index} [${resumedShort}]** · **${resumedTitle}** (\`${resumedId}\` · ${restoredCount} messages${resumedTarget ? ` · target \`${resumedTarget}\`` : ""})${carriedNote}${repairNote}`;
+    const archiveNote = loaded.archivedMessages > 0 ? `\n${loaded.archivedMessages} earlier messages remain in the source history on disk.` : "";
+    const bannerText = `resumed session **#${loaded.summary.index} [${resumedShort}]** · **${resumedTitle}** (\`${resumedId}\` · ${restoredCount} messages${resumedTarget ? ` · target \`${resumedTarget}\`` : ""})${carriedNote}${repairNote}${archiveNote}`;
     if (ctx.output.ui) {
-      ctx.output.ui.hydrateFromHistory(restoredMessages, {
-        bannerText,
-      });
+      // The transcript is already on screen; re-render it only if the agent's repaired history differs.
+      if (!preview && agentDropped === 0 && restoredCount === loaded.messages.length) ctx.output.ui.addSystem(bannerText);
+      else ctx.output.ui.hydrateFromHistory(restoredMessages, { bannerText });
       if (ctx.opts.json) {
         ctx.output.emit("command.result", {
           command: "resume",

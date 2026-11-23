@@ -52,6 +52,8 @@ omr --json app.apk "find the license check"  # machine-readable events for scrip
 - **Scriptable.** `--json` event stream, stable exit codes, and an embeddable SDK (`oh-my-rea/sdk`).
 - **Accurate context accounting.** Context windows come from the provider or [models.dev](https://models.dev), never from a guess. If a window is unknown, omr says so.
 
+In 0.6.0 the terminal paints before backend startup, and `omr --resume` shows a transcript preview while the session loads. Turns run without a default step limit. Set `OMR_MAX_STEPS` to cap a turn and `OMR_AUTO_EXTEND_STEPS` to opt into extra step blocks. A saved `max_steps: 40` from an older version is treated as the legacy default.
+
 ## How it works
 
 ```

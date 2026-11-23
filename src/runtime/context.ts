@@ -1,7 +1,9 @@
 import { appendFile, copyFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Agent, type QueuedSteerItem } from "../agent.js";
+import { describeIncompleteTurn } from "../outcome.js";
 import type { LaunchOptions } from "../args.js";
+import { abortable } from "../concurrency.js";
 import {
   STAGED_BANG_MAX_BLOCKS,
   formatBangDisplay,
@@ -722,7 +724,15 @@ export class OmrContext {
           return notes.length > 0 ? notes.join("\n\n") : null;
         },
         progressEpoch: () => this.runtime.progress.epoch,
-        beforeStep: async signal => {await this.runtime.investigation.refresh({signal});await this.syncLocalStatus();},
+        beforeStep: async signal => {
+          if (!this.rea || this.rea.isClosed) {
+            signal?.throwIfAborted();
+            await abortable(this.ensureConnected(), signal);
+            if (this.currentTarget) await abortable(this.ensureTargetOpen(), signal);
+          }
+          await this.runtime.investigation.refresh({ signal });
+          await this.syncLocalStatus();
+        },
         stepContext: () => [this.runtime.investigation.note(),this.runtime.task.contextNote(3000),this.runtime.browser.contextNote()?.slice(0,2000)].filter(Boolean).join("\n\n"),
         reviewCompletion: () => this.runtime.investigation.completionReview(),
         ...(this.modelController.modelInfo?.config.maxSteps !== undefined
@@ -865,9 +875,9 @@ export class OmrContext {
             this.targetOpened = false;
             this.boundProvider = null;
             runtime.investigation.disconnect();
-            void this.syncLocalStatus();
-            this.output.fail(
-              `${detail}\nREA will restart automatically on your next command.`,
+            void this.syncLocalStatus().catch(() => {});
+            this.output.systemNotice(
+              `${detail}\nREA will restart automatically before the next step or command.`,
             );
           },
         },
@@ -929,6 +939,7 @@ export class OmrContext {
       if (this.agent) {
         this.broker.restoreSticky(this.agent.history);
       }
+      await this.modelController.whenCapabilitiesReady();
       this.ensureAgentInitialized();
       this.booting = false;
       this.output.ui?.setBusy(null);
@@ -1185,23 +1196,9 @@ export class OmrContext {
       this.output.fail(reason);
       return;
     }
-    try {
-      await this.ensureConnected();
-      if (this.currentTarget) await this.ensureTargetOpen();
-    } catch {
-      return;
-    }
-    this.ensureAgentInitialized();
-    if (!this.agent) {
-      const reason = `no model configured: ${this.modelController.modelError ?? "unknown error"}`;
-      this.output.fail(reason);
-      return;
-    }
-
-    this.lastUserPrompt = input;
-    await this.runtime.investigation.discover(stripInternalPromptNotes(input)).catch(()=>{});
     this.activeAbort = new AbortController();
     if (this.operationSignal?.aborted) this.activeAbort.abort(this.operationSignal.reason);
+    const signal = this.activeAbort.signal;
     this.interruptingForSteer = false;
     const started = Date.now();
     const evidenceBefore = this.evidenceSeen.size;
@@ -1212,9 +1209,23 @@ export class OmrContext {
     ui?.setBusy("thinking");
 
     try {
-      await this.runtime.assertRecoveryReady();
+      try {
+        await abortable(this.ensureConnected(), signal);
+        if (this.currentTarget) await abortable(this.ensureTargetOpen(), signal);
+      } catch (error) {
+        if (signal.aborted) throw error;
+        return;
+      }
+      this.ensureAgentInitialized();
+      if (!this.agent) {
+        this.output.fail(`no model configured: ${this.modelController.modelError ?? "unknown error"}`);
+        return;
+      }
+      this.lastUserPrompt = input;
+      await abortable(this.runtime.investigation.discover(stripInternalPromptNotes(input)).catch(() => {}), signal);
+      await abortable(this.runtime.assertRecoveryReady(), signal);
       const taskGoal=this.opts.goal ?? stripInternalPromptNotes(input);
-      await this.runtime.task.initializeGoal(taskGoal);
+      await abortable(this.runtime.task.initializeGoal(taskGoal), signal);
       const turn = await this.agent.run(
         effectiveInput,
         {
@@ -1388,7 +1399,7 @@ export class OmrContext {
           onUsage: (_turnUsage, totalTokens) =>
             ui?.setStatus({ tokens: totalTokens }),
         },
-        this.activeAbort.signal,
+        signal,
         turnImages.length > 0 ? turnImages : undefined,
       );
 
@@ -1400,7 +1411,7 @@ export class OmrContext {
         steps: turn.steps, tool_calls: turn.toolCalls, usage: turn.usage, duration_ms: elapsedMs,
       });
       if (turn.status !== "completed" && !turn.aborted) {
-        this.output.systemNotice(`turn ${turn.status}${turn.finishReason ? ` (${turn.finishReason})` : ""}; context is available for continuation`);
+        this.output.systemNotice(`turn ${turn.status}${turn.finishReason ? ` (${turn.finishReason})` : ""}: ${describeIncompleteTurn(turn.finishReason)}; context is kept for continuation`);
       }
       const newEvidence = Math.max(0, this.evidenceSeen.size - evidenceBefore);
       wasInterruptedForSteer = this.interruptingForSteer;
@@ -1499,11 +1510,18 @@ export class OmrContext {
       ) {
         ui.setNetworkStatus(null);
       }
-      this.output.fail(`model error: ${message}`);
-      if (this.opts.json) this.output.writeError(`model error: ${message}`);
+      if (signal.aborted) {
+        this.output.recordOutcome({ status: "cancelled", finishReason: null });
+        this.output.systemNotice("turn cancelled during preparation");
+        this.output.emit("turn.aborted", { label, steps: 0, tool_calls: 0 });
+      } else {
+        this.output.fail(`model error: ${message}`);
+        if (this.opts.json) this.output.writeError(`model error: ${message}`);
+      }
     } finally {
       this.activeAbort = null;
       this.interruptingForSteer = false;
+      ui?.setBusy(null);
       await this.syncLocalStatus();
     }
 

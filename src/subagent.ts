@@ -13,8 +13,8 @@ import { asArray, asRecord, asString } from "./values.js";
 import { abortable, ConcurrencyLimiter } from "./concurrency.js";
 import type { SessionBinding } from "./runtime/sessionRuntime.js";
 
-export const SUBAGENT_DEFAULT_MAX_STEPS = 10;
-export const SUBAGENT_MAX_STEPS_LIMIT = 16;
+/** Subagent step cap is opt-in (`max_steps` >= 2); `0` means unlimited. */
+const stepCap = (maxSteps: number): string => (maxSteps > 0 ? String(maxSteps) : "∞");
 export const SUBAGENT_MAX_CONCURRENCY = 4;
 
 const BLOCKED_SUBAGENT_TOOLS: ReadonlySet<string> = new Set([
@@ -520,10 +520,7 @@ export class SubagentRunner {
       request.role?.trim() ||
       (wf ? `${wf.id}-analyst` : "re-subagent");
     const id = this.allocateId(request.id ?? request.role ?? wf?.id);
-    const maxSteps = Math.min(
-      Math.max(2, Math.trunc(request.maxSteps ?? SUBAGENT_DEFAULT_MAX_STEPS)),
-      SUBAGENT_MAX_STEPS_LIMIT,
-    );
+    const maxSteps = request.maxSteps !== undefined && request.maxSteps >= 2 ? Math.trunc(request.maxSteps) : 0;
     const dependsOn = (request.dependsOn ?? [])
       .map((d) => this.resolveNode(d)?.id ?? d.trim())
       .filter(Boolean);
@@ -761,7 +758,7 @@ export class SubagentRunner {
                 tools: [],
               };
               node.stepsLog.push(activeStepTrace);
-              notify(`step ${step}/${node.maxSteps} · thinking`);
+              notify(`step ${step}/${stepCap(node.maxSteps)} · thinking`);
             },
             onReasoningDelta: (delta) => {
               if (!activeStepTrace) return;
@@ -791,7 +788,7 @@ export class SubagentRunner {
                 resultPreview: "",
               });
               notify(
-                `step ${node.currentStep}/${node.maxSteps} → ${displayTool}${summary ? `(${summary})` : ""}`,
+                `step ${node.currentStep}/${stepCap(node.maxSteps)} → ${displayTool}${summary ? `(${summary})` : ""}`,
               );
             },
             onToolEnd: (callId, outcome) => {
@@ -1255,7 +1252,7 @@ export class SubagentRunner {
       return {
         text: [
           `[omr_task subagent spawned in background: \`${node.id}\` (${node.role})]`,
-          `status: ${node.status} · workflow: ${node.workflow ? `/${node.workflow}` : "custom"} · max_steps: ${node.maxSteps}`,
+          `status: ${node.status} · workflow: ${node.workflow ? `/${node.workflow}` : "custom"} · max_steps: ${node.maxSteps > 0 ? node.maxSteps : "unlimited"}`,
           `goal: ${node.goal}`,
           `You can continue your own REA tool calls now, inspect live progress via \`omr_task { action: "inspect", agent_id: "${node.id}" }\`, course-correct it via \`omr_task { action: "steer", agent_id: "${node.id}", prompt: "..." }\`, or collect its final answer via \`omr_task { action: "wait", agent_id: "${node.id}" }\`.`,
         ].join("\n"),
@@ -1339,7 +1336,7 @@ export const renderSubagentGraph = (snap: SubagentGraphSnapshot): string => {
       `${pipe}   goal: "${clipPreview(node.goal, 96)}"`,
     );
     lines.push(
-      `${pipe}   metrics: step ${node.currentStep}/${node.maxSteps} · ${node.totalToolCalls} tool(s) · ${node.evidenceIds.length} ev_ · ${node.totalTokens} tok · ${durTag} · ${node.currentActivity}`,
+      `${pipe}   metrics: step ${node.currentStep}/${stepCap(node.maxSteps)} · ${node.totalToolCalls} tool(s) · ${node.evidenceIds.length} ev_ · ${node.totalTokens} tok · ${durTag} · ${node.currentActivity}`,
     );
 
     for (const steer of node.steers) {
@@ -1409,7 +1406,7 @@ export const renderSubagentInspector = (node: SubagentNodeSnapshot): string => {
     `  workflow   ${wfTag} · mode=${node.mode} · parent=${node.parentId}${node.dependsOn.length > 0 ? ` · depends_on=[${node.dependsOn.join(", ")}]` : ""}`,
     `  goal       ${node.goal}`,
     `  activity   ${node.currentActivity}`,
-    `  progress   step ${node.currentStep}/${node.maxSteps} (${node.totalSteps} total steps across ${node.turnsRun} turn(s)) · ${node.totalToolCalls} tool calls · ${node.totalTokens} tokens`,
+    `  progress   step ${node.currentStep}/${stepCap(node.maxSteps)} (${node.totalSteps} total steps across ${node.turnsRun} turn(s)) · ${node.totalToolCalls} tool calls · ${node.totalTokens} tokens`,
     `  evidence   ${node.evidenceIds.length > 0 ? node.evidenceIds.join(", ") : "none"}`,
   ];
   if (node.unknownIds.length > 0) {

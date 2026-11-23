@@ -9,7 +9,7 @@ import { parseArgs } from "../dist/args.js";
 import { createDefaultCommandRegistry } from "../dist/runtime.js";
 import { OmrContext } from "../dist/runtime/context.js";
 import { OutputSink } from "../dist/runtime/output.js";
-import { createSession, loadSavedSession, saveSessionHistory } from "../dist/session.js";
+import { createSession, loadSavedSession, previewSavedSession, saveSessionHistory } from "../dist/session.js";
 import { FakeRea } from "../dist/testing/fakes.js";
 
 const makeAgent = () => new Agent({ model: "fixture" }, { definitions: () => [] }, { systemPrompt: "system" });
@@ -31,6 +31,28 @@ const withContext = async (fn) => {
 };
 
 describe("B13: saved conversation boundaries validate nested protocol data", () => {
+  it("previews a large legacy history and keeps its newest complete exchange in a bounded projection", async () => {
+    await withContext(async ({ session, ctx }) => {
+      const messages = [
+        { role: "user", content: "Initial operator task" },
+        ...Array.from({ length: 20 }, () => ({ role: "assistant", content: "ç \\\" ".repeat(50_000) })),
+        { role: "assistant", content: null, tool_calls: [call] },
+        { role: "tool", tool_call_id: "valid", content: "retained result" },
+        { role: "assistant", content: "Fresh transcript tail" },
+      ];
+      const source = JSON.stringify({ title: "Legacy", in_flight: true, messages });
+      await writeFile(session.historyPath, source);
+      const preview = await previewSavedSession("last", undefined, ctx.sessionsRootDir);
+      assert.equal(preview.messages.at(-1).content, "Fresh transcript tail");
+      const loaded = await loadSavedSession("last", undefined, ctx.sessionsRootDir);
+      assert.equal(loaded.inFlight, true);
+      assert.equal(loaded.summary.firstUserPrompt, "Initial operator task");
+      assert.ok(loaded.archivedMessages > 0);
+      assert.deepEqual(loaded.messages.slice(-3).map((message) => message.role), ["assistant", "tool", "assistant"]);
+      assert.equal(loaded.messages.at(-2).content, "retained result");
+      assert.equal(await readFile(session.historyPath, "utf8"), source);
+    });
+  });
   it("drops malformed calls and orphans while preserving valid call/result groups", () => {
     const agent = makeAgent();
     const source = [

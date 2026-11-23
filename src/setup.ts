@@ -8,9 +8,9 @@
  * and never sends anything but the public package name to the npm registry.
  */
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { VERSION } from "./version.js";
@@ -52,6 +52,7 @@ const siblingCheckout = (): string | undefined =>
     fileURLToPath(new URL("../../rea/scripts/rea.mjs", import.meta.url)),
   ].find((candidate) => existsSync(candidate));
 
+/** Blocking `rea --version`; ~1 s because REA itself is a large Node app. Never call it on the launch path. */
 const readReaVersion = (command: string, args: readonly string[]): string | null | undefined => {
   const run = spawnSync(command, [...args, "--version"], { encoding: "utf8", timeout: 8_000, stdio: ["ignore", "pipe", "ignore"] });
   if (run.error || run.status !== 0) return undefined;
@@ -59,11 +60,67 @@ const readReaVersion = (command: string, args: readonly string[]): string | null
   return parsed ? parsed.join(".") : null;
 };
 
-/** Resolves REA the same way `Rea.connect` launches it: env override, sibling checkout, then PATH. */
+/** Non-blocking `rea --version` for background refreshes; resolves `undefined` when REA cannot be run. */
+const readReaVersionAsync = (command: string): Promise<string | null | undefined> =>
+  new Promise((resolve) => {
+    let out = "";
+    let settled = false;
+    const finish = (value: string | null | undefined): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const child = spawn(command, ["--version"], { stdio: ["ignore", "pipe", "ignore"] });
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish(undefined);
+    }, 15_000);
+    timer.unref();
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => { out += chunk; });
+    child.once("error", () => finish(undefined));
+    child.once("close", (code) => finish(code === 0 ? (parseVersion(out)?.join(".") ?? null) : undefined));
+  });
+
+/** Resolves a command on PATH without spawning it (a few `stat` calls instead of a ~1 s process). */
+export const findOnPath = (name: string, env: NodeJS.ProcessEnv = process.env): string | undefined => {
+  const extensions = process.platform === "win32" ? ["", ...(env["PATHEXT"] ?? ".EXE;.CMD;.BAT").split(";")] : [""];
+  for (const dir of (env["PATH"] ?? "").split(delimiter)) {
+    if (!dir) continue;
+    for (const extension of extensions) {
+      const candidate = join(dir, `${name}${extension}`);
+      try {
+        if (!statSync(candidate).isFile()) continue;
+        accessSync(candidate, constants.X_OK);
+        return candidate;
+      } catch {
+        // not here; keep walking PATH
+      }
+    }
+  }
+  return undefined;
+};
+
+/**
+ * Resolves REA the same way `Rea.connect` launches it: env override, sibling checkout, then PATH.
+ * Fast and synchronous: PATH is searched, not executed. The version of a PATH install comes from the
+ * update cache (keyed by binary path + mtime) and is `null` until a background refresh has recorded it.
+ * A broken-but-present `rea` is therefore reported by the MCP connect error instead of by an upfront probe.
+ */
 export const detectRea = (env: NodeJS.ProcessEnv = process.env): ReaStatus => {
   const override = env["OMR_REA_COMMAND"];
   if (override) return { state: "ok", version: null, source: "env" };
   if (siblingCheckout()) return { state: "ok", version: null, source: "checkout" };
+  const path = findOnPath("rea", env);
+  if (!path) return { state: "missing" };
+  return { state: "ok", version: cachedReaVersion(env, path), source: "path" };
+};
+
+/** Exact detection for `omr setup` / `omr update`: actually runs `rea --version` (blocking, ~1 s). */
+export const detectReaExact = (env: NodeJS.ProcessEnv = process.env): ReaStatus => {
+  const fast = detectRea(env);
+  if (fast.state !== "ok" || fast.source !== "path") return fast;
   const version = readReaVersion("rea", []);
   return version === undefined ? { state: "missing" } : { state: "ok", version, source: "path" };
 };
@@ -73,6 +130,8 @@ export const detectRea = (env: NodeJS.ProcessEnv = process.env): ReaStatus => {
 interface UpdateCache {
   checkedAt: number;
   latest: Partial<Record<typeof OMR_PACKAGE | typeof REA_PACKAGE, string>>;
+  /** Installed REA version, valid while the binary at `path` still has this `mtimeMs`. */
+  rea?: { path: string; mtimeMs: number; version: string };
 }
 
 const cachePath = (env: NodeJS.ProcessEnv = process.env): string =>
@@ -82,7 +141,9 @@ const readCache = (env: NodeJS.ProcessEnv): UpdateCache | null => {
   try {
     const raw = JSON.parse(readFileSync(cachePath(env), "utf8")) as Partial<UpdateCache>;
     if (typeof raw.checkedAt !== "number" || typeof raw.latest !== "object" || raw.latest === null) return null;
-    return { checkedAt: raw.checkedAt, latest: raw.latest };
+    const rea = raw.rea;
+    const validRea = rea && typeof rea.path === "string" && typeof rea.mtimeMs === "number" && typeof rea.version === "string";
+    return { checkedAt: raw.checkedAt, latest: raw.latest, ...(validRea ? { rea } : {}) };
   } catch {
     return null;
   }
@@ -120,9 +181,31 @@ const refreshCache = async (env: NodeJS.ProcessEnv): Promise<UpdateCache> => {
   const latest: UpdateCache["latest"] = { ...previous?.latest };
   if (omr) latest[OMR_PACKAGE] = omr;
   if (rea) latest[REA_PACKAGE] = rea;
-  const cache = { checkedAt: Date.now(), latest };
+  const cache: UpdateCache = { checkedAt: Date.now(), latest, ...(previous?.rea ? { rea: previous.rea } : {}) };
   writeCache(env, cache);
   return cache;
+};
+
+const mtimeOf = (path: string): number | null => {
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return null;
+  }
+};
+
+const cachedReaVersion = (env: NodeJS.ProcessEnv, path: string): string | null => {
+  const rea = readCache(env)?.rea;
+  return rea && rea.path === path && rea.mtimeMs === mtimeOf(path) ? rea.version : null;
+};
+
+/** Records the installed REA version off the launch path so the update notice can compare it next start. */
+const refreshReaVersion = async (env: NodeJS.ProcessEnv, path: string): Promise<void> => {
+  const mtimeMs = mtimeOf(path);
+  const version = await readReaVersionAsync(path);
+  if (mtimeMs === null || !version) return;
+  const previous = readCache(env) ?? { checkedAt: 0, latest: {} };
+  writeCache(env, { ...previous, rea: { path, mtimeMs, version } });
 };
 
 const isNewer = (latest: string | undefined, installed: string | null): boolean => {
@@ -144,6 +227,10 @@ export const updateNotice = (env: NodeJS.ProcessEnv = process.env): string | nul
   }
   if (!cache) return null;
   const rea = detectRea(env);
+  if (rea.state === "ok" && rea.source === "path" && rea.version === null) {
+    const path = findOnPath("rea", env);
+    if (path) void refreshReaVersion(env, path).catch(() => {});
+  }
   const outdated: string[] = [];
   if (isNewer(cache.latest[OMR_PACKAGE], VERSION)) outdated.push(`omr ${cache.latest[OMR_PACKAGE]}`);
   if (rea.state === "ok" && rea.source === "path" && isNewer(cache.latest[REA_PACKAGE], rea.version)) outdated.push(`rea ${cache.latest[REA_PACKAGE]}`);
@@ -197,7 +284,7 @@ const printBox = (lines: readonly string[]): void => {
  */
 export const ensureRea = async (env: NodeJS.ProcessEnv = process.env): Promise<number | null> => {
   if (env["OMR_SKIP_SETUP"] === "1") return null;
-  if (detectRea(env).state === "ok") return null;
+  if (env["OMR_REA_COMMAND"] || siblingCheckout() || findOnPath("rea", env)) return null;
 
   const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
   if (!interactive) {
@@ -233,7 +320,7 @@ export const runSetup = async (env: NodeJS.ProcessEnv = process.env): Promise<nu
   }
   const stop = await ensureRea(env);
   if (stop !== null) return stop;
-  const rea = detectRea(env);
+  const rea = detectReaExact(env);
   const where = rea.state === "ok" ? `${rea.source}${rea.version ? ` ${rea.version}` : ""}` : "missing";
   process.stdout.write(`REA: ${where}\n`);
   return 0;
@@ -242,7 +329,7 @@ export const runSetup = async (env: NodeJS.ProcessEnv = process.env): Promise<nu
 /** `omr update`: bring omr and REA to the latest npm release. */
 export const runUpdate = async (env: NodeJS.ProcessEnv = process.env): Promise<number> => {
   const cache = await refreshCache(env);
-  const rea = detectRea(env);
+  const rea = detectReaExact(env);
   const targets: { name: string; spec: string; from: string }[] = [];
   const latestOmr = cache.latest[OMR_PACKAGE];
   if (isNewer(latestOmr, VERSION)) targets.push({ name: "omr", spec: `${OMR_PACKAGE}@latest`, from: VERSION });

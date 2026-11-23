@@ -1,6 +1,7 @@
 import { createInterface } from "node:readline";
 import type { LaunchOptions } from "./args.js";
 import { inspectTargetMagic } from "./binaryArt.js";
+import { releaseEarlyInput } from "./earlyInput.js";
 import { resolveReaEnv } from "./env.js";
 import type { ChatImageBlock } from "./model.js";
 import {
@@ -14,7 +15,7 @@ import { registerSessionHandlers } from "./runtime/handlers/sessionHandlers.js";
 import { registerSystemHandlers } from "./runtime/handlers/systemHandlers.js";
 import { registerWorkflowHandlers } from "./runtime/handlers/workflowHandlers.js";
 import { OutputSink } from "./runtime/output.js";
-import { createSession } from "./session.js";
+import { PROJECT_INSTRUCTIONS_LIMIT, createSession } from "./session.js";
 import {
   detectTarget,
   listTargetCandidates,
@@ -39,9 +40,6 @@ export const runOmr = async (
   deps?: OmrRuntimeDeps,
 ): Promise<number> => {
   const cwd = deps?.cwd ?? process.cwd();
-  const { env, sources } = deps?.env
-    ? { env: deps.env, sources: [...(deps.envSources ?? [])] }
-    : resolveReaEnv();
 
   const uiEnabled =
     !opts.plain &&
@@ -51,37 +49,77 @@ export const runOmr = async (
     !deps &&
     Boolean(process.stdin.isTTY && process.stdout.isTTY);
 
-  const candidates = uiEnabled ? await listTargetCandidates(cwd) : [];
-  const currentTarget = opts.target
-    ? resolveTargetPath(opts.target, cwd)
-    : await detectTarget(cwd);
-  const currentMagic = await inspectTargetMagic(currentTarget);
-  const session = await createSession(currentTarget, null, {
-    rootDir: deps?.sessionsRootDir,
-  });
-
+  if (!uiEnabled) releaseEarlyInput();
   const output = new OutputSink({
     json: opts.json,
     writeStdout: deps?.writeStdout,
     writeStderr: deps?.writeStderr,
   });
-  const ctx = new OmrContext({
-    opts,
-    cwd,
-    env,
-    sources,
-    sessionsRootDir: deps?.sessionsRootDir,
-    output,
-    session,
-    currentTarget,
-    currentMagic,
-    deps,
-  });
-  await ctx.persistMeta();
-  await ctx.modelController.hydrateActiveCapabilities();
+  let ctx: OmrContext;
+  let initialization: Promise<void> | undefined;
+  const initialize = async (): Promise<void> => {
+    const { env, sources } = deps?.env
+      ? { env: deps.env, sources: [...(deps.envSources ?? [])] }
+      : resolveReaEnv();
+    const candidates = uiEnabled ? await listTargetCandidates(cwd) : [];
+    const currentTarget = opts.target
+      ? resolveTargetPath(opts.target, cwd)
+      : uiEnabled ? (candidates.length === 1 ? candidates[0]! : null) : await detectTarget(cwd);
+    const currentMagic = await inspectTargetMagic(currentTarget);
+    const session = await createSession(currentTarget, null, { rootDir: deps?.sessionsRootDir });
+    ctx = new OmrContext({
+      opts, cwd, env, sources, sessionsRootDir: deps?.sessionsRootDir,
+      output, session, currentTarget, currentMagic, deps,
+    });
+    await ctx.persistMeta();
+    if (uiEnabled) ctx.modelController.beginCapabilityHydration();
+    else await ctx.modelController.hydrateActiveCapabilities();
+
+    output.emit("session.start", {
+      session_dir: session.dir,
+      target: ctx.currentTarget,
+      model: ctx.modelId,
+      profile: ctx.activeProfile?.id ?? null,
+    });
+    const startupInstructions = ctx.activeProjectInstructions();
+    if (startupInstructions) {
+      output.emit("agents.loaded", {
+        path: startupInstructions.path,
+        chars: startupInstructions.chars,
+        truncated: startupInstructions.truncated,
+      });
+    }
+    const ui = output.ui;
+    if (ui) {
+      ui.setCommands(ctx.allCommands());
+      ui.setStatus({
+        model: ctx.modelId,
+        modelProvider: ctx.modelController.modelInfo?.config.providerId ?? null,
+        effort: ctx.modelController.modelInfo?.config.reasoningEffort ?? "auto",
+        target: ctx.currentTarget,
+        magic: ctx.currentMagic,
+        candidates,
+        session: session.id,
+      });
+      if (startupInstructions) ui.addSystem(
+        `loaded **AGENTS.md** (${startupInstructions.chars} chars${startupInstructions.truncated ? `, cut to ${PROJECT_INSTRUCTIONS_LIMIT}` : ""}) — re-read automatically when it changes · /agents.md for details`,
+      );
+      if (ctx.activeProfile) ui.addSystem(
+        `active profile **${ctx.activeProfile.id}** (${ctx.activeProfile.summary}) · effort **${ctx.activeProfile.effort}**`,
+      );
+      ui.setBusy(null);
+    } else if (!opts.json) {
+      output.write(`omr ${VERSION} · ${ctx.currentTarget ?? "no target"} · session ${session.id}${ctx.activeProfile ? ` · profile ${ctx.activeProfile.id}` : ""}`);
+      output.write(`model ${ctx.modelId}${ctx.modelController.modelError && !opts.noModel ? ` (${ctx.modelController.modelError})` : ""}`);
+      if (startupInstructions) output.write(`agents.md ${startupInstructions.path} (${startupInstructions.chars} chars)`);
+    }
+    if (opts.dashboard && !opts.command && !opts.goal) {
+      const dashboard = ctx.startDashboard();
+      if (!uiEnabled) await dashboard;
+    }
+  };
 
   const registry = createDefaultCommandRegistry();
-
   const runLine = async (
     line: string,
     images?: readonly ChatImageBlock[],
@@ -124,7 +162,7 @@ export const runOmr = async (
   ): void => {
     const trimmed = line.trim();
     if (
-      ctx.isTurnActive() &&
+      ctx?.isTurnActive() &&
       !trimmed.startsWith("/") &&
       !trimmed.startsWith("!")
     ) {
@@ -137,6 +175,7 @@ export const runOmr = async (
     }
     lineChain = lineChain
       .then(async () => {
+        await initialization;
         const keep = await runLine(line, submitOpts?.images);
         if (!keep) {
           await ctx.shutdown("complete");
@@ -157,16 +196,18 @@ export const runOmr = async (
     );
   };
   const onUncaughtException = (error: Error): void => {
-    void ctx.shutdown("crashed").finally(() => {
+    void (ctx?.shutdown("crashed") ?? Promise.resolve()).finally(() => {
       process.stderr.write(`omr crashed: ${error.stack ?? error.message}\n`);
       process.exit(1);
     });
   };
   const onSigterm = (): void => {
-    void ctx.shutdown("cancelled").finally(() => process.exit(143));
+    output.ui?.stop();
+    void (ctx?.shutdown("cancelled") ?? Promise.resolve()).finally(() => process.exit(143));
   };
   const onSighup = (): void => {
-    void ctx.shutdown("cancelled").finally(() => process.exit(129));
+    output.ui?.stop();
+    void (ctx?.shutdown("cancelled") ?? Promise.resolve()).finally(() => process.exit(129));
   };
 
   if (!deps) {
@@ -183,38 +224,8 @@ export const runOmr = async (
     process.off("SIGHUP", onSighup);
   };
 
-  output.emit("session.start", {
-    session_dir: session.dir,
-    target: ctx.currentTarget,
-    model: ctx.modelId,
-    profile: ctx.activeProfile?.id ?? null,
-  });
-  const startupInstructions = ctx.activeProjectInstructions();
-  if (startupInstructions) {
-    output.emit("agents.loaded", {
-      path: startupInstructions.path,
-      chars: startupInstructions.chars,
-    });
-  }
-  if (!uiEnabled && !opts.json) {
-    output.write(
-      `omr ${VERSION} · ${ctx.currentTarget ?? "no target"} · session ${session.id}${ctx.activeProfile ? ` · profile ${ctx.activeProfile.id}` : ""}`,
-    );
-    output.write(
-      `model ${ctx.modelId}${ctx.modelController.modelError && !opts.noModel ? ` (${ctx.modelController.modelError})` : ""}`,
-    );
-    if (startupInstructions) {
-      output.write(
-        `agents.md ${startupInstructions.path} (${startupInstructions.chars} chars)`,
-      );
-    }
-  }
-
-  if (opts.dashboard && !opts.command && !opts.goal) {
-    await ctx.startDashboard();
-  }
-
   const resumeLine = opts.resume ? `/resume ${opts.resume}` : null;
+  if (!uiEnabled) await initialize();
   const runBatch = async (work: () => Promise<void>): Promise<number> => {
     try {
       if (resumeLine) await runLine(resumeLine);
@@ -252,35 +263,36 @@ export const runOmr = async (
     const { TerminalUi: TerminalUiImpl } = await import("./tui.js");
     const ui = new TerminalUiImpl({
       cwd,
-      commands: ctx.allCommands(),
-      providers: () => ctx.modelController.providers,
+      commands: [],
+      providers: () => ctx?.modelController.providers ?? [],
       onSubmit: (line, submitOpts) =>
         submitQueued(line, undefined, submitOpts),
-      onDequeueSteer: () => ctx.dequeueLiveSteer(),
+      onDequeueSteer: () => ctx?.dequeueLiveSteer(),
       onInterrupt: () => {
-        if (ctx.activeAbort) {
+        if (ctx?.activeAbort) {
           ctx.activeAbort.abort();
           return;
         }
-        void ctx.shutdown("cancelled").then(() => process.exit(130));
+        ui.stop();
+        void (ctx?.shutdown("cancelled") ?? Promise.resolve()).then(() => process.exit(130));
       },
       onExit: () => {
-        void ctx.shutdown("complete").then(() => process.exit(0));
+        ui.stop();
+        void (ctx?.shutdown("complete") ?? Promise.resolve()).then(() => process.exit(0));
       },
       onOpenModelPicker: (focusProviderId) => {
-        ctx.modelController.openInteractiveModelPicker(focusProviderId);
+        ctx?.modelController.openInteractiveModelPicker(focusProviderId);
       },
       onOpenEffortPicker: () => {
-        ctx.modelController.openInteractiveEffortPicker();
+        ctx?.modelController.openInteractiveEffortPicker();
       },
       onOpenCompactionModelPicker: () => {
-        ctx.modelController.openInteractiveCompactionModelPicker();
+        ctx?.modelController.openInteractiveCompactionModelPicker();
       },
       onSelectModel: (providerId, nextModel, effort, saveDefault) => {
-        void ctx.modelController
+        void ctx?.modelController
           .applyModelSelection(providerId, nextModel, saveDefault, effort)
           .then(({ savedPath }) => {
-            ctx.modelController.rememberEffort(effort);
             const effTag = effort !== "auto" ? ` · thinking **${effort}**` : "";
             ui.addSystem(
               savedPath
@@ -296,12 +308,13 @@ export const runOmr = async (
           });
       },
       onSelectEffort: (effort, saveDefault) => {
+        if (!ctx) return;
         try {
           const { savedPath } = ctx.modelController.applyEffortSelection(
             effort,
             saveDefault,
           );
-          ctx.modelController.rememberEffort(effort);
+          if (!savedPath) ctx.modelController.rememberEffort(effort);
           ui.addSystem(
             savedPath
               ? `Thinking effort → **${effort}** *(saved default in \`${savedPath}\`)*`
@@ -315,6 +328,7 @@ export const runOmr = async (
         }
       },
       onSelectCompactionModel: (spec, saveDefault) => {
+        if (!ctx) return;
         try {
           const { spec: resolvedSpec, savedPath } =
             ctx.modelController.applyCompactionModelSelection(spec, saveDefault);
@@ -333,32 +347,29 @@ export const runOmr = async (
         }
       },
       onRefreshModels: () => {
-        void ctx.modelController.triggerProvidersRefresh(true);
+        void ctx?.modelController.triggerProvidersRefresh(true);
       },
     });
     output.setUi(ui);
-    ui.setStatus({
-      model: ctx.modelId,
-      modelProvider: ctx.modelController.modelInfo?.config.providerId ?? null,
-      effort: ctx.modelController.modelInfo?.config.reasoningEffort ?? "auto",
-      target: ctx.currentTarget,
-      magic: ctx.currentMagic,
-      candidates,
-      session: session.id,
-    });
+    ui.setBusy("initializing session");
+    // `--resume` replaces this throwaway session's runtime, so connecting REA for it first would boot a
+    // second REA process (and make `/resume` wait for the first one). Connect after the resume instead.
+    if (resumeLine) {
+      submitQueued(resumeLine, () => void ctx?.ensureConnected().catch(() => {}));
+    }
     ui.start();
-    if (startupInstructions) {
-      ui.addSystem(
-        `loaded **AGENTS.md** (${startupInstructions.chars} chars) — re-read automatically when it changes · /agents.md for details`,
-      );
+    initialization = new Promise<void>((resolve) => setImmediate(resolve)).then(initialize);
+    void initialization.catch((error: unknown) => {
+      ui.setBusy(null);
+      output.fail(error instanceof Error ? error.message : String(error));
+    });
+    void import("./setup.js").then(({ updateNotice }) => {
+      const notice = updateNotice();
+      if (notice) ui.addSystem(notice);
+    }).catch(() => {});
+    if (!resumeLine) {
+      void initialization.then(() => ctx.ensureConnected()).catch(() => {});
     }
-    if (ctx.activeProfile) {
-      ui.addSystem(
-        `active profile **${ctx.activeProfile.id}** (${ctx.activeProfile.summary}) · effort **${ctx.activeProfile.effort}**`,
-      );
-    }
-    void ctx.ensureConnected().catch(() => {});
-    if (resumeLine) submitQueued(resumeLine);
     return new Promise<number>(() => {});
   }
 

@@ -6,6 +6,8 @@ Detailed reference for omr: configuration, commands, tools, session layout, SDK 
 
 ## Model configuration
 
+In 0.6.0, startup draws the terminal before backend initialization and resume loads the transcript preview first. Turn step limits and automatic step extensions both require explicit configuration.
+
 Write `~/.config/rea/omr-model.json`:
 
 ```json
@@ -13,17 +15,39 @@ Write `~/.config/rea/omr-model.json`:
   "base_url": "https://your-endpoint/v1",
   "model": "your-model-id",
   "api_key_env": "YOUR_API_KEY_ENV",
-  "max_tokens": 8192,
-  "max_steps": 40
+  "max_tokens": 8192
 }
 ```
 
 - `api_key_env` names the exported environment variable holding the key; `api_key` is also accepted.
 - Zero-config startup works automatically whenever any supported provider key is exported in your shell.
 - Optional `"providers"` map in `omr-model.json` lets you define multiple custom/self-hosted provider profiles alongside the 33 built-in providers.
-- Environment overrides: `OMR_PROVIDER`, `OMR_PROTOCOL`, `OMR_BASE_URL`, `OMR_MODEL`, `OMR_FALLBACK_MODELS` (comma-separated `provider:model` failover chain), `OMR_BUDGET_TOKENS` (cumulative session token cap), `OMR_EFFORT` (`auto` · `off` · `minimal` · `low` · `medium` · `high` · `xhigh`), `OMR_API_KEY`, `OMR_API_KEY_ENV`, `OMR_MAX_TOKENS`, `OMR_MAX_STEPS`, `OMR_AUTO_EXTEND_STEPS` (default `50`, max `1000`: extra step blocks granted while tool calls keep succeeding; `0` disables), `OMR_TEMPERATURE`, `OMR_TIMEOUT_MS`, `OMR_PING_INTERVAL_MS` / `OMR_NET_WAIT_MS` (Network Guard probe interval and maximum hold, honoring `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` & `NO_PROXY`).
-- **Crash safety**: the conversation is checkpointed after every completed step. `omr --resume` (or `--resume=<id>`, or `/resume`) restores the last session and, if it ended mid-turn (crash, kill, power loss), continues that turn automatically — no manual `continue` needed.
+- Environment overrides: `OMR_PROVIDER`, `OMR_PROTOCOL`, `OMR_BASE_URL`, `OMR_MODEL`, `OMR_FALLBACK_MODELS` (comma-separated `provider:model` failover chain), `OMR_BUDGET_TOKENS` (cumulative session token cap), `OMR_EFFORT` (`auto` · `off` · `minimal` · `low` · `medium` · `high` · `xhigh`), `OMR_API_KEY`, `OMR_API_KEY_ENV`, `OMR_MAX_TOKENS`, `OMR_MAX_STEPS` (opt-in cap on model steps per turn; default `0` = unlimited), `OMR_AUTO_EXTEND_STEPS` (only with a step cap: extra blocks granted while the last step still ran a successful tool call; default `0`, max `10`), `OMR_TEMPERATURE`, `OMR_TIMEOUT_MS` (stream idle detector, default `600000`; a stall is retried automatically, `0` disables it), `OMR_MAX_RETRIES` (transient 429/5xx/stream-error retries per request with jittered backoff up to 60 s, default `12`), `OMR_PING_INTERVAL_MS` / `OMR_NET_WAIT_MS` (Network Guard probe interval and maximum hold, honoring `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` & `NO_PROXY`).
+- **Crash safety**: the conversation is checkpointed after every completed step. `omr --resume` (or `--resume=<id>`, or `/resume`) shows the saved transcript tail while the continuation loads. The composer accepts input during restore and queues submitted commands. Checkpoints larger than 4 MiB restore a bounded recent projection and keep the entire source history on disk. An interrupted turn continues automatically once its session is ready and any uncertain side effects have been reconciled.
+
+## Turn limits and recovery timers
+
+A turn runs until the model gives a final answer, you abort it (Ctrl+C / Esc), or an unrecoverable error occurs. The step count and token budget are unlimited by default. Tool and stream inactivity timers detect stuck requests without limiting the number of steps in a turn.
+
+| Setting | Default | Effect when set |
+| --- | --- | --- |
+| `OMR_MAX_STEPS` / `max_steps` | unlimited (`0`) | Caps model steps per turn. Reaching the cap reports `step_budget`. A saved `max_steps: 40` from an older version is treated as the legacy default. Set `OMR_MAX_STEPS=40` to opt into that exact cap. |
+| `OMR_AUTO_EXTEND_STEPS` / `auto_extend_steps` | off (`0`) | With a step cap, grants up to 10 extra blocks while tools keep succeeding. |
+| `OMR_BUDGET_TOKENS` / `/budget <tokens>` | off | Session token cap; the turn stops with `budget_exhausted` when reached. |
+| `OMR_TOOL_TIMEOUT_MS` | 300000 | REA tool inactivity timeout in milliseconds. Progress notifications reset it. A timed-out call returns an error to the model. Set `0` to allow the maximum timer interval of about 24.8 days. |
+| `OMR_RUN_MAX_TIMEOUT_SEC` | none | Ceiling for the `timeout_s` the model may request from `omr_run` (an unspecified `timeout_s` still defaults to 30 s per script and returns an error result when exceeded). |
+| `OMR_NET_WAIT_MS` / `max_network_wait_ms` | unlimited | How long to keep probing during a network outage before failing the request. |
+| `omr_task` `max_steps` | unlimited | Optional cap for one subagent. |
+
+Long-run survival, always on:
+
+- **Context**: the configured compaction strategy runs automatically whenever the window fills, mid-turn. If a summary cannot be produced and tool-output stubbing is not enough, the oldest complete tool exchanges are dropped (never splitting a tool call from its result) and the turn keeps going; Evidence and Unknowns stay in the session ledger.
+- **Provider/network errors**: 429, 5xx, dropped or stalled streams and provider `error` events are retried with backoff. Reasoning, text and tool deltas reset the idle timer. Transport heartbeats alone leave the idle timer running. A response cut by `max_tokens` or a `tool_calls` finish with no usable call is retried with a nudge (bounded to 3 in a row).
+- **REA recovery**: a disconnected backend restarts before the next model step. The execution journal retains any uncertain side effect for reconciliation.
+- **Tool failures**: a tool that errors, times out or has an uncertain outcome is reported to the model as an error result. Uncertain side effects stay recorded, so an identical blind repeat is still refused.
+- **Loop guard**: repeated identical calls are executed anyway and the result carries a warning; it never ends or blocks the turn.
 - `XDG_CONFIG_HOME` relocates the config directory.
+- Selecting a thinking effort in the TUI or with `/effort` remembers that setting for the next launch. An explicit `OMR_EFFORT` still takes precedence.
 - `/model`, `/effort`, `/providers`, `/failover`, `/budget`, `/net`, and `/doctor` inspect resolved endpoints, models, failover chains, token budgets, proxy-aware Net Guard probes, thinking budgets, and key sources (never printing secret values). Pressing `Alt+S` / `Ctrl+S` in the Model Picker (or `/model --save <provider:model>`, `/effort --save <level>`, `/failover --save <chain>`, `/budget --save <tokens>`) saves the default additively to `omr-model.json` with an automatic `.bak` backup.
 
 ## Usage
@@ -44,14 +68,14 @@ omr --dashboard target.apk               # serve live session dashboard on 127.0
 
 In the TUI:
 
-- **Continuous Live Bitstream**: Opens immediately (< 50 ms first paint) with the `OMR` emblem, continuously flowing binary wings, top-bar 8-bit pulse, and a real-byte hex/bit disassembler strip inspecting the active artifact's magic header (`ELF`, `APK`, `PE`, `Mach-O`, `DEX`, `WASM`, `PCAP`, `SQLite`). Default `on` mode streams continuously even while idle (backed by cached timeline lines & differential ANSI frames); cycle modes (`on` · `eco` · `busy` · `off`) with `Ctrl+B` or `/binary`.
+- **Continuous Live Bitstream**: The `OMR` emblem and composer paint before target discovery, session initialization, model capability lookup and REA connection. Once the target is available the display adds a real-byte hex/bit strip of its magic header. Default `on` mode streams continuously even while idle (backed by cached timeline lines & differential ANSI frames). Cycle modes (`on` · `eco` · `busy` · `off`) with `Ctrl+B` or `/binary`.
 - **Interactive Model, Provider & Thinking Effort Selector** (`Alt+M`, `F2`, `Alt+E`, `/model`, `/effort`, `/providers`): Full two-pane matrix browsing all 33+ built-in, local, and custom providers, live `/models` discovery (`Alt+R` / `Ctrl+R`), instant fuzzy filtering, and arbitrary custom model ID entry. Selecting a model smoothly opens a Step-2 **Thinking / Reasoning Effort** bar (`auto` · `off` · `minimal` · `low` · `medium` · `high` · `xhigh`) mapped to Anthropic `thinking.budget_tokens` and OpenAI/OpenRouter `reasoning_effort`, with default config persistence (`Alt+S` / `Ctrl+S`).
 - **Unified Investigation Timeline**: User prompts, live model reasoning (`◈ thinking`), connected inline tool-call trees (`╭─ / ├─ / ╰─` with durations & `⟦ev_…⟧` chips), and syntax-highlighted Markdown reports render in chronological order on all terminal widths.
 - **Disassembler HUD** (`≥116` columns): Continuous binary/hex oscilloscope, target magic & size, bound deep provider, active LLM provider & model, Evidence/Unknown/Journal/Token telemetry, and recent tool call trace.
 - **Inspector & Output Drawer**: Local command outputs open in a dismissible drawer (`Esc` closes; `Ctrl+O` expands to a full-screen top-aligned viewer with `↑/↓`, `j/k`, `PgUp/PgDn`, `g/G`).
 - **Multi-line Composer, Ghost Hints, `@` Mentions & Fuzzy Palette**: Auto-grows up to 6 lines (`Shift+Enter` / `Alt+Enter` / `Ctrl+J` for newline). Typing `/` or pressing `Ctrl+K` opens the fuzzy command palette with inline ghost autocomplete (`Tab` or `→` accepts), shortcut pills, sub-argument completion (`/binary `, `/model `, `/providers `, `/image `, `/screenshot `), and path completion (`/open`, `/export`, `/compare`, `/image`). Typing `@` opens the workspace file & image mention popup (`@screenshot.png` attaches the image to the vision turn; `@src/main.c:10-40` injects the sliced file into `<file>` context).
 - **Vision, Image Attachments & Multi-Source Screenshots** (`/image`, `/screenshot`, `Ctrl+V`, `Alt+S`): Paste clipboard images (`Ctrl+V`), drag-and-drop image paths, mention `@image.png`, or run `/image <path|url|clipboard|list|clear> [prompt]` and `/screenshot [desktop|region|window|adb|browser|binary] [prompt]` (`Alt+S` quick capture). Renders 24-bit ANSI half-block (`▀`) terminal image previews, clickable OSC 8 `file://` links, and a `640×360` 2D RGB Byte-Class & Shannon Entropy Heatmap (`binary` mode) for visual binary forensics. Non-vision models automatically receive a deterministic forensic visual summary (dimensions, SHA-256, byte entropy, 6×4 RGB color grid, and ASCII strings).
-- **Safe Cancellation**: `Esc` (or `Ctrl+C` pressed twice) aborts an active model/tool turn (propagating cancellation to REA and keeping chat history valid); when idle, `Ctrl+C` twice or `Ctrl+D` exits cleanly.
+- **Safe Cancellation**: `Esc` or `Ctrl+C` aborts an active model/tool turn immediately (propagating cancellation to REA and keeping chat history valid); when idle, `Ctrl+C` twice or `Ctrl+D` exits cleanly.
 
 ## Commands
 
@@ -148,7 +172,7 @@ Exposing all ~246 REA schemas per step would cost ~271 KB of context, so `omr` s
   - **DAG Dependencies (`depends_on: ["sub-1"]`)**: Chain downstream subagents on upstream subagent IDs; downstream nodes automatically receive upstream findings and `ev_<64-hex>` IDs.
   - **Step-by-Step Inspection & Graph (`action: "inspect" | "graph"`)**: Inspect any subagent's live step telemetry (`thinking`, `tool_exec`, `steered`, `done`), tool call arguments, duration, and Evidence IDs, or render the full Subagent Mesh DAG (`/subagents`, `/graph`, `/mesh`, and the live `/dashboard`).
   - **Supervisor Course-Correction (`action: "steer"` / `/steer <id> <directive>`)**: Inject corrective instructions mid-flight into a running subagent (at the next clean step boundary) or resume a completed subagent's stateful conversation history to fix a flawed assumption.
-- `omr_run { script, code?, args?, stdin?, timeout_s?, network? }` — write and run a script from the session `scripts/` directory (`.py`, `.sh`, `.mjs`/`.cjs`, `.yar`/`.yara`) and get its real stdout, stderr and exit code, so a decryptor, parser or rule is tested before it is reported as working. The child gets a scrubbed environment (no provider keys), a timeout (default 30 s, max 300 s), bounded output and, by default, an empty network namespace (`unshare -rn`; reported as `NOT isolated` when the host cannot provide one). `network: true` opts into the host network. It never executes the target binary. Each run writes `scripts/.runs/<script>.<time>.json` with the script SHA-256, exit code and output preview.
+- `omr_run { script, code?, args?, stdin?, timeout_s?, network? }` — write and run a script from the session `scripts/` directory (`.py`, `.sh`, `.mjs`/`.cjs`, `.yar`/`.yara`) and get its stdout, stderr and exit code. The child gets a scrubbed environment, a timeout (default 30 s), bounded output and, by default, an empty network namespace (`unshare -rn`, reported as `NOT isolated` when unavailable). `OMR_RUN_MAX_TIMEOUT_SEC` optionally limits the requested timeout. `network: true` opts into the host network. Each run writes `scripts/.runs/<script>.<time>.json` with the script SHA-256, exit code and output preview.
 - `omr_view_image { path, focus? }` — autonomously load a local image file (`.png`, `.jpg`, `.webp`, `.gif`, `.bmp`), remote `http(s)://` image URL, or `data:image/` URI into the vision context with forensic metadata (SHA-256, dimensions, entropy, strings).
 - `omr_screenshot { source?, target?, focus? }` — autonomously capture and inspect a screenshot (`binary` 2D RGB byte-class & entropy heatmap, `adb` Android screen, `browser` page, `desktop`, `region`, or `window`) and attach the image to the next model step.
 
@@ -379,6 +403,13 @@ startup/import/tool, loopback10ms SSE TTFT, routed schema, compaction ve trace r
 ölçer. `--real-rea` verilmezse kontrollü stdio fixture kullanır. Ham örnekler, fingerprint,
 nearest-rank p50/p95 ve RSS türleri saklanır; fresh Node process OS cache flush demek değildir.
 Uzak model/API çağrısı veya dependency kurulumu yapılmaz.
+
+`npm run bench:startup -- --samples 10 --out <report.json>` interaktif TUI'nin açılışını gerçek
+bir pty üzerinde ölçer (`python3` ve PATH'te `rea` gerekir): ilk çizim, açılışta yazılan
+`/help` komutunun çalışması, 24 saatlik model-limit önbelleği bayatken ilk çizim ve büyük
+bir oturumla `--resume` (transcript'in görünmesi / geri yükleme tamamlanması). Config, cwd ve
+oturumlar geçicidir; kullanıcı config'ine dokunmaz. `--entry <bin/omr.js>` ile başka bir
+build aynı harness'la ölçülür.
 
 `node test/live-native-resume.mjs --report <report.json>` ayrıca kurulu yerel REA ile
 inert JS uygulama dizinini analiz eder; native Evidence export/import, source session

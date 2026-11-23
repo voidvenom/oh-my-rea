@@ -87,7 +87,9 @@ export interface ReaPort {
  * graphs, Ghidra decompiles, large APKs) legitimately runs longer, so omr uses an
  * inactivity window that REA progress notifications keep extending.
  */
-export const DEFAULT_TOOL_TIMEOUT_MS = 900_000;
+/** Default inactivity window for a single native tool. Progress resets the window. */
+export const DEFAULT_TOOL_TIMEOUT_MS = 300_000;
+export const MAX_TOOL_TIMEOUT_MS = 2_147_483_647;
 const STDERR_TAIL_BYTES = 8_192;
 
 export const parseEnvelope = (text: string): unknown => {
@@ -271,9 +273,11 @@ export class Rea implements ReaPort {
       if (typeof value === "string") childEnv[key] = value;
     }
     childEnv["REA_SESSION_DIR"] = sessionDir;
-    const [{ Client }, { StdioClientTransport }] = await Promise.all([
+    const [{ Client }, { StdioClientTransport }, { AjvJsonSchemaValidator }, { createLazyValidatorProvider }] = await Promise.all([
       import("@modelcontextprotocol/client"),
       import("@modelcontextprotocol/client/stdio"),
+      import("@modelcontextprotocol/client/validators/ajv"),
+      import("./lazyValidator.js"),
     ]);
     const reaCommand = childEnv["OMR_REA_COMMAND"] ?? siblingForkLauncher();
     // stderr is piped (never inherited) so REA diagnostics cannot corrupt the TUI's
@@ -297,7 +301,7 @@ export class Rea implements ReaPort {
 
     let rea: Rea | null = null;
     let earlyCatalogChange = false;
-    const client = new Client({ name: "omr", version: VERSION }, { listChanged: {
+    const client = new Client({ name: "omr", version: VERSION }, { jsonSchemaValidator: createLazyValidatorProvider(new AjvJsonSchemaValidator()), listChanged: {
       tools: { autoRefresh: false, debounceMs: 0, onChanged: () => {
         if (rea) rea.invalidateCatalog(); else earlyCatalogChange = true;
       } },
@@ -339,7 +343,7 @@ export class Rea implements ReaPort {
       client,
       transport,
       catalog,
-      Math.max(1_000, options.toolTimeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS),
+      options.toolTimeoutMs === 0 ? MAX_TOOL_TIMEOUT_MS : Math.min(MAX_TOOL_TIMEOUT_MS, Math.max(1_000, options.toolTimeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS)),
       stderrTail,
       sessionDir,
       envSources,
@@ -468,13 +472,9 @@ export class Rea implements ReaPort {
         signal,
         timeout: this.toolTimeoutMs,
         resetTimeoutOnProgress: true,
-        ...(onProgress
-          ? {
-              onprogress: (progress: { message?: string | undefined }) => {
-                if (progress.message) onProgress(progress.message);
-              },
-            }
-          : {}),
+        onprogress: (progress: { message?: string | undefined }) => {
+          if (progress.message) onProgress?.(progress.message);
+        },
       },
     );
     return normalizeMcpResult(result, Math.round(performance.now() - started));

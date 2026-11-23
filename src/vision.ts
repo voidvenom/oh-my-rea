@@ -52,6 +52,7 @@ export interface MentionFileBlock {
   readonly resolvedPath: string;
   readonly lineRange: string | null;
   readonly content: string;
+  readonly truncated: boolean;
 }
 
 export interface ExtractedPromptMentions {
@@ -83,6 +84,7 @@ export const isImageFilePath = (filePath: string): boolean =>
   IMAGE_FILE_EXTENSIONS.has(extname(filePath).toLowerCase());
 
 const MAX_MENTION_FILE_BYTES = 256 * 1024;
+const MAX_MENTION_TEXT_CHARS = 24_000;
 const MAX_REMOTE_IMAGE_BYTES = 20 * 1024 * 1024;
 
 // Precomputed IEEE 802.3 CRC32 table for PNG chunk framing.
@@ -1513,11 +1515,16 @@ export const extractPromptMentions = async (
           .map((l, idx) => `${startLine + idx}: ${l}`)
           .join("\n");
       }
+      const truncated = text.length > MAX_MENTION_TEXT_CHARS;
+      const content = truncated
+        ? `${text.slice(0, MAX_MENTION_TEXT_CHARS)}\n… [truncated to ${MAX_MENTION_TEXT_CHARS} chars]`
+        : text;
       fileBlocks.push({
         displayPath: filePart,
         resolvedPath: resolved,
         lineRange,
-        content: text,
+        content,
+        truncated,
       });
     } catch {
       // Ignore unreadable file

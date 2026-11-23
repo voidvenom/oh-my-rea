@@ -175,7 +175,7 @@ async function refresh() {
       title.textContent = n.id + ' [' + n.role + ']' + (n.workflow ? ' {' + n.workflow + '}' : '');
       const badge = document.createElement('span');
       badge.className = 'pill ' + (n.status === 'completed' ? 'ok' : n.status === 'running' ? 'acc' : n.status === 'queued' ? 'warn' : 'bad');
-      badge.textContent = n.status + ' · step ' + n.currentStep + '/' + n.maxSteps + (n.durationMs != null ? ' · ' + dur(n.durationMs) : '');
+      badge.textContent = n.status + ' · step ' + n.currentStep + '/' + (n.maxSteps > 0 ? n.maxSteps : '∞') + (n.durationMs != null ? ' · ' + dur(n.durationMs) : '');
       head.append(title, badge);
       const goal = document.createElement('div'); goal.className = 'muted'; goal.textContent = n.goal;
       box.append(head, goal);

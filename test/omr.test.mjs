@@ -123,6 +123,7 @@ import {
   deriveSessionTitle,
   evidenceIdsInMessages,
   formatShortSessionId,
+  PROJECT_INSTRUCTIONS_LIMIT,
   extractCodeBlocks,
   listRecentSessions,
   loadSavedSession,
@@ -2968,7 +2969,7 @@ describe("Operator authority: no restricting prompts reach the model", () => {
 });
 
 describe("Project AGENTS.md instructions and Ctrl+Backspace word delete", () => {
-  it("reads <cwd>/AGENTS.md live, excludes omr's own /jb block, never cuts it, and injects it before the live context", async () => {
+  it("reads <cwd>/AGENTS.md live, excludes omr's own /jb block, bounds it, and injects it before the live context", async () => {
     const dir = await mkdtemp(join(tmpdir(), "omr-agents-"));
     try {
       assert.equal(
@@ -2992,6 +2993,7 @@ describe("Project AGENTS.md instructions and Ctrl+Backspace word delete", () => 
         "the /jb block is delivered separately, not duplicated",
       );
       assert.equal(first.text.includes("\r"), false);
+      assert.equal(first.truncated, false);
 
       // An edit is picked up on the next read (size changes), with no restart.
       await writeFile(
@@ -3007,11 +3009,11 @@ describe("Project AGENTS.md instructions and Ctrl+Backspace word delete", () => 
       );
       assert.equal(readProjectInstructions(dir), null);
 
-      // Large files are sent whole: there is no size cap.
-      await writeFile(agentsPath, `# Big\n${"x".repeat(200_000)}`);
+      await writeFile(agentsPath, `# Big\n${"x".repeat(PROJECT_INSTRUCTIONS_LIMIT + 500)}`);
       const big = readProjectInstructions(dir);
-      assert.equal(big.text.length, "# Big\n".length + 200_000);
-      assert.equal(big.chars, big.text.length);
+      assert.equal(big.text.length, PROJECT_INSTRUCTIONS_LIMIT);
+      assert.equal(big.truncated, true);
+      assert.ok(big.chars > big.text.length);
 
       const sys = systemPrompt({
         target: "/tmp/a.elf",
@@ -3027,6 +3029,7 @@ describe("Project AGENTS.md instructions and Ctrl+Backspace word delete", () => 
         projectInstructions: {
           path: agentsPath,
           text: "Name hooks after the symbol.",
+          truncated: true,
         },
       });
       const project = sys.indexOf("# Project Instructions (AGENTS.md)");
@@ -3037,7 +3040,7 @@ describe("Project AGENTS.md instructions and Ctrl+Backspace word delete", () => 
         "project instructions precede the live context; /jb stays last and wins",
       );
       assert.match(sys, /Name hooks after the symbol\./);
-      assert.doesNotMatch(sys, /AGENTS\.md was cut here/);
+      assert.match(sys, /AGENTS\.md was cut here/);
       assert.match(sys, /already authorized: apply them as written/);
 
       const without = systemPrompt({
@@ -3574,7 +3577,7 @@ describe("omr_run: verified script execution and CDP hardening", () => {
   });
 
   it("isolates the network by default and only reaches the host when asked", async (t) => {
-    if (!networkIsolationAvailable()) {
+    if (!(await networkIsolationAvailable())) {
       t.skip("unprivileged network namespaces are unavailable on this host");
       return;
     }
@@ -3767,7 +3770,7 @@ describe("LoopGuard: repeated identical calls stop burning steps", () => {
     );
   });
 
-  it("stops a model that repeats the same call inside a turn without dispatching it again", async () => {
+  it("warns a model that repeats the same call but still runs it and never ends the turn", async () => {
     let dispatched = 0;
     let step = 0;
     const model = {
@@ -3821,11 +3824,12 @@ describe("LoopGuard: repeated identical calls stop burning steps", () => {
     });
     const turn = await agent.run("decompile main");
     assert.equal(turn.text, "done");
-    assert.equal(dispatched, LOOP_LIMIT);
+    assert.equal(dispatched, 5, "every call executes; the guard only nudges");
     const guarded = agent.history.filter(
       (m) => m.role === "tool" && /loop guard/.test(m.content ?? ""),
     );
     assert.equal(guarded.length, 5 - LOOP_LIMIT);
+    assert.ok(guarded.every((m) => /pseudo/.test(m.content)), "the real result is still delivered");
     agent.history.forEach((m, i) => {
       if (m.role === "tool")
         assert.ok(
@@ -4162,7 +4166,7 @@ describe("Step budget auto-extension, mid-turn checkpoints, and crash-resume", (
     assert.throws(() => parseArgs(["node", "omr", "--resume="]), /requires a value/);
   });
 
-  it("extends the step budget only while new Evidence arrives, up to the configured limit", async () => {
+  it("extends the step budget while tool calls keep succeeding, up to the configured limit", async () => {
     // 7 productive steps with a 3-step budget: needs two extensions (3 -> 6 -> 9).
     const extended = [];
     const agent = new Agent(scriptedModel(7), okBroker(), {
@@ -4191,7 +4195,7 @@ describe("Step budget auto-extension, mid-turn checkpoints, and crash-resume", (
     });
     const capped = await endless.run("go");
     assert.equal(capped.steps, 9);
-    assert.match(capped.text, /step budget exhausted after 9 model turns/);
+    assert.match(capped.text, /step limit reached: 9 model steps/);
 
     // Disabled by default and when set to 0: unchanged behavior.
     for (const opts of [{}, { autoExtendSteps: 0 }]) {
@@ -4202,7 +4206,7 @@ describe("Step budget auto-extension, mid-turn checkpoints, and crash-resume", (
       });
       const r = await plain.run("go");
       assert.equal(r.steps, 3);
-      assert.match(r.text, /exhausted after 3 model turns/);
+      assert.match(r.text, /step limit reached: 3 model steps/);
     }
 
     // Failing tools are not progress: no extension is granted.
@@ -5400,30 +5404,35 @@ describe("Uninterrupted turns: empty tool_calls recovery & robust terminal input
   };
 
   it("repairs a finish_reason=tool_calls reply that carried no tool call instead of ending the turn", async () => {
-    const seen = [];
+    const checkpoints = [];
     let calls = 0;
     const model = {
       model: "fake",
       async stream(messages) {
         calls += 1;
-        seen.push(messages.map((m) => m.role).join(","));
         if (calls === 1) return { content: "", reasoning: "", toolCalls: [], finishReason: "tool_calls", usage };
         if (calls === 2) {
           const last = messages.at(-1);
           assert.equal(last.role, "user");
-          assert.match(last.content, /no valid tool call reached the runtime/);
+          assert.match(last.content, /contained no valid tool call/);
           return { content: "", reasoning: "", toolCalls: [{ id: "c1", type: "function", function: { name: "t", arguments: "{}" } }], finishReason: "tool_calls", usage };
         }
         return { content: "done", reasoning: "", toolCalls: [], finishReason: "stop", usage };
       },
     };
-    const agent = new Agent(model, stubBroker, { systemPrompt: () => "s", maxSteps: 2 });
+    const agent = new Agent(model, stubBroker, {
+      systemPrompt: "s",
+      maxSteps: 3,
+      historyCheckpoint: async (messages) => { checkpoints.push(structuredClone(messages)); },
+    });
     const turn = await agent.run("go");
     assert.equal(turn.status, "completed");
     assert.equal(turn.text, "done");
     assert.equal(calls, 3);
     // The empty assistant reply must not stay in history as a content:null protocol violation.
-    assert.ok(agent.history.filter((m) => m.role === "assistant").every((m) => m.content !== null || m.tool_calls?.length));
+    for (const messages of checkpoints) {
+      assert.ok(messages.filter((m) => m.role === "assistant").every((m) => m.content !== null || m.tool_calls?.length));
+    }
   });
 
   it("continues after a length cut-off and still reports partial after repeated empty replies", async () => {
@@ -5448,9 +5457,12 @@ describe("Uninterrupted turns: empty tool_calls recovery & robust terminal input
         return { content: "", reasoning: "", toolCalls: [], finishReason: "tool_calls", usage };
       },
     };
-    const stalled = await new Agent(stuck, stubBroker, { systemPrompt: () => "s", maxSteps: 3 }).run("go");
+    const stalledAgent = new Agent(stuck, stubBroker, { systemPrompt: "s" });
+    const stalled = await stalledAgent.run("go");
     assert.equal(stalled.status, "partial");
-    assert.ok(always <= 10, `bounded recovery, got ${always} model calls`);
+    assert.equal(stalled.finishReason, "tool_calls");
+    assert.equal(always, 4);
+    assert.ok(stalledAgent.history.every((message) => message.role !== "assistant"));
   });
 
   const makeUi = (over = {}) => {
@@ -5474,6 +5486,9 @@ describe("Uninterrupted turns: empty tool_calls recovery & robust terminal input
     await new Promise((r) => setTimeout(r, 90));
     assert.equal(events.interrupts, 0, "split wheel sequence must not cancel the turn");
     assert.equal(ui.composer, "", "no stray characters leak into the composer");
+    ui.handleText("\x1b[<64;10");
+    await new Promise((r) => setTimeout(r, 90));
+    assert.equal(events.interrupts, 0, "an abandoned sequence is not a lone Esc");
     // A genuine lone Esc still cancels, after the short wait.
     ui.handleText("\x1b");
     await new Promise((r) => setTimeout(r, 90));
@@ -5493,18 +5508,20 @@ describe("Uninterrupted turns: empty tool_calls recovery & robust terminal input
     assert.equal(ui.composer, "abcdef");
   });
 
-  it("requires a second Ctrl+C to interrupt a running turn, and supports Shift+Insert / Ctrl+Insert", async () => {
-    const { ui, events } = makeUi({ onClipboardText: async () => "yapistirilan" });
+  it("interrupts on the first Ctrl+C and supports Shift+Insert and Ctrl+Insert", async () => {
+    const copies = [];
+    const { ui, events } = makeUi({ onClipboardText: async () => "yapistirilan", onCopyText: (text) => copies.push(text) });
     ui.setBusy("working");
     ui.handleText("\x03");
-    assert.equal(events.interrupts, 0, "first Ctrl+C only arms");
-    ui.handleText("\x03");
-    assert.equal(events.interrupts, 1, "second Ctrl+C interrupts");
+    assert.equal(events.interrupts, 1);
 
     ui.setBusy(null);
     ui.handleText("\x1b[2;2~");
     await new Promise((r) => setTimeout(r, 50));
     assert.equal(ui.composer, "yapistirilan");
+    ui.endAssistant("copied response");
+    ui.handleText("\x1b[2;5~");
+    assert.deepEqual(copies, ["copied response"]);
   });
 });
 
@@ -5527,11 +5544,18 @@ describe("Remembered thinking effort", () => {
       assert.equal(stored.model, "m1");
       assert.equal(stored.max_steps, 40);
       assert.equal(resolveModelConfig(env).config.reasoningEffort, "high", "next launch starts with the chosen effort");
+      assert.equal(resolveModelConfig(env).config.maxSteps, 0);
+      assert.equal(resolveModelConfig(env).config.autoExtendSteps, 0);
 
       saveReasoningEffortDefault("off", env);
       assert.equal(resolveModelConfig(env).config.reasoningEffort, "off");
       // An explicit env override still wins for a single run.
       assert.equal(resolveModelConfig({ ...env, OMR_EFFORT: "low" }).config.reasoningEffort, "low");
+
+      const malformed = '{"reasoning_effort":';
+      await writeFile(cfg, malformed);
+      assert.throws(() => saveReasoningEffortDefault("high", env), /Unable to read the existing model configuration/);
+      assert.equal(await (await import("node:fs/promises")).readFile(cfg, "utf8"), malformed);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

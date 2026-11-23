@@ -45,9 +45,6 @@ import {
 } from "./compaction.js";
 import { buildSnapcompactArchive } from "./snapcompact.js";
 
-/** How many times in a row an empty/cut-off model reply is repaired automatically before the turn is reported as partial. */
-const MAX_EMPTY_TURN_RECOVERIES = 8;
-
 export interface AgentEvents {
   /**
    * Called after every completed step whose tool results are all in history (a valid, resumable
@@ -291,6 +288,36 @@ export const compactToolOutput = (raw: string): string => {
   );
 };
 
+/** Settle immediately when `signal` aborts, even if the underlying work ignores the signal. */
+const abortable = <T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> => {
+  if (!signal) return work;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    if (signal.aborted) { onAbort(); work.catch(() => {}); return; }
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+};
+
+/** Hard bound on consecutive in-turn recoveries (empty/truncated tool turns) before the turn is reported partial. */
+const MAX_TURN_RECOVERIES = 3;
+/** Consecutive provider context-overflow recoveries (reset by any successful model response). */
+const MAX_CONTEXT_RECOVERIES = 6;
+const TRIM_NOTE = /^\[omr\] (\d+) older tool-exchange messages were dropped/;
+
+/**
+ * OpenAI-compatible providers disagree on finish_reason spelling and some omit it when `[DONE]` follows a
+ * tool call. A turn that carries tool calls is a tool turn unless the provider said it was cut off.
+ */
+export const normalizeFinishReason = (raw: string | null, toolCallCount: number, hasContent = false): string | null => {
+  const reason = raw?.trim().toLowerCase() ?? null;
+  if (reason === "function_call" || reason === "tool_call" || reason === "tool_use" || reason === "tool-calls") return "tool_calls";
+  if (reason === "end_turn" || reason === "stop_sequence" || reason === "eos") return "stop";
+  // Providers that omit finish_reason after `[DONE]`: tool calls mean a tool turn, plain text means a final answer.
+  if (!reason) return toolCallCount > 0 ? "tool_calls" : hasContent ? "stop" : raw;
+  return reason;
+};
+
 export class Agent {
   private readonly messages: ChatMessage[];
   private model: ModelPort;
@@ -364,14 +391,11 @@ export class Agent {
     const settings = this.settings();
     try { this.toolSchemaTokens = (this.model.capabilities ?? resolveModelCapabilities(this.model.model,this.model.providerId)).tools === false ? 0 : estimateToolTokens(this.broker.definitions(this.resolveToolContext())); }
     catch { /* A catalog refresh can temporarily withhold schemas; the last admitted estimate remains visible. */ }
-    const estimate = estimateTokens(this.historyChars()) + this.toolSchemaTokens + this.stepContextTokens;
+    const estimate = estimateRequestTokens(this.messages) + this.toolSchemaTokens + this.stepContextTokens;
     let tokens = estimate;
     let source: ContextUsage["source"] = "estimate";
     if (this.lastUsage && this.lastUsage.count <= this.messages.length) {
-      let after = 0;
-      for (let i = this.lastUsage.count; i < this.messages.length; i += 1)
-        after += messageChars(this.messages[i]!);
-      const reported = this.lastUsage.tokens + estimateTokens(after);
+      const reported = this.lastUsage.tokens + estimateRequestTokens(this.messages.slice(this.lastUsage.count));
       if (reported >= estimate) {
         tokens = reported;
         source = "provider";
@@ -597,6 +621,56 @@ export class Agent {
       beforeChars,
       afterChars: this.historyChars(),
     };
+  }
+
+  /**
+   * Last-resort context relief for a single very long turn: drop the oldest complete assistant/tool
+   * exchanges (never splitting a tool_call from its results, never touching user messages, always keeping
+   * the newest exchange) until the request fits the window. Returns how many messages were dropped.
+   */
+  private trimToWindow(): number {
+    const usage = this.contextUsage();
+    const budget = usage.window - (usage.outputReserveTokens ?? 0);
+    if (usage.tokens <= budget) return 0;
+    const note = (count: number): ChatMessage => ({
+      role: "user",
+      content: `[omr] ${count} older tool-exchange messages were dropped to keep this long turn inside the model context window. Evidence (ev_ ids) and Unknowns remain in the session ledger; re-query anything you still need.`,
+    });
+    const costs = this.messages.map(message => estimateRequestTokens([message]));
+    let remaining = costs.reduce((total, cost) => total + cost, 0) + this.toolSchemaTokens + this.stepContextTokens;
+    const noteBudget = estimateRequestTokens([note(Number.MAX_SAFE_INTEGER)]);
+    const lastAssistant = this.messages.findLastIndex(message => message.role === "assistant");
+    const retained: ChatMessage[] = [];
+    let carried = 0;
+    let dropped = 0;
+    let firstDropAt = -1;
+    for (let i = 0; i < this.messages.length; i += 1) {
+      const message = this.messages[i]!;
+      const prior = message.role === "user" && TRIM_NOTE.exec(message.content ?? "");
+      if (prior) {
+        carried += Number(prior[1]);
+        remaining -= costs[i]!;
+        continue;
+      }
+      if (remaining + noteBudget > budget && message.role === "assistant" && i < lastAssistant) {
+        if (firstDropAt < 0) firstDropAt = retained.length;
+        do {
+          remaining -= costs[i]!;
+          dropped += 1;
+          if (this.messages[i + 1]?.role !== "tool") break;
+          i += 1;
+        } while (i < this.messages.length);
+        continue;
+      }
+      retained.push(message);
+    }
+    if (dropped > 0 || carried > 0) {
+      retained.splice(firstDropAt < 0 ? 1 : firstDropAt, 0, note(dropped + carried));
+      this.messages.length = 0;
+      for (const message of retained) this.messages.push(message);
+    }
+    this.lastUsage = null;
+    return dropped;
   }
 
   private async autoCompact(
@@ -906,18 +980,18 @@ export class Agent {
     let totalToolCalls = 0;
     let completionReviews = 0;
     const loopGuard = new LoopGuard();
-    const maxSteps = this.options.maxSteps ?? 16;
-    const maxExtensions = Math.max(
+    // Unlimited unless the operator opted in (OMR_MAX_STEPS > 0): a turn ends on a final answer, an abort,
+    // or an unrecoverable error, never because a counter ran out.
+    const maxSteps = this.options.maxSteps !== undefined && this.options.maxSteps > 0 ? this.options.maxSteps : Number.POSITIVE_INFINITY;
+    const maxExtensions = Number.isFinite(maxSteps) ? Math.max(
       0,
       Math.trunc(this.options.autoExtendSteps ?? 0),
-    );
+    ) : 0;
     let stepBudget = maxSteps;
     let extensionsUsed = 0;
     let finishReason: string | null = null;
     let contextRecoveries = 0;
-    // Consecutive steps whose reply produced no executable tool call although one was expected
-    // (empty `tool_calls` finish, or a `length` cut-off). Reset by any step that runs a tool.
-    let emptyTurnRecoveries = 0;
+    let turnRecoveries = 0;
     const flushPendingSteers = (step: number): boolean => {
       if (this.steerQueue.length === 0) return false;
       const items = this.steerQueue.splice(0, this.steerQueue.length);
@@ -941,6 +1015,7 @@ export class Agent {
 
     for (let step = 1; step <= stepBudget; step += 1) {
       let stepMadeProgress = false;
+      let stepToolSucceeded = false;
       const progressBefore = this.options.progressEpoch?.();
       if (signal?.aborted) {
         if (pristine()) this.messages.splice(initialHistoryLength);
@@ -1020,6 +1095,13 @@ export class Agent {
       // immediately exposes format-specific direct tools on the next step.
       const context = this.contextUsage();
       if (this.settings().windowSource !== "unknown" && context.tokens + (context.outputReserveTokens ?? 0) > context.window) {
+        // Compaction could not make room. Shed the oldest complete tool exchanges rather than ending a
+        // long turn; only an unshrinkable request (system prompt + user messages alone) is unrecoverable.
+        const dropped = this.trimToWindow();
+        if (dropped > 0) await this.options.trace?.("context.emergency-trim", {step, dropped});
+      }
+      const fitted = this.contextUsage();
+      if (this.settings().windowSource !== "unknown" && fitted.tokens + (fitted.outputReserveTokens ?? 0) > fitted.window) {
         return {text: "[omr] context and output reserve exceed the active model window; shorten the active input or use /compaction before continuing.", steps: step - 1, toolCalls: totalToolCalls, aborted: false, status: "partial", finishReason: "context_window", usage: turnUsage};
       }
 
@@ -1083,7 +1165,8 @@ export class Agent {
             events.onStreamReset?.();
           },
         );
-        finishReason = result.finishReason;
+        finishReason = normalizeFinishReason(result.finishReason, result.toolCalls.length, result.content.trim().length > 0);
+        contextRecoveries = 0;
         await this.options.trace?.("model.result", {model: this.model.model, provider: this.model.providerId ?? null, step, finishReason, usage: result.usage});
         if (events.onSpeed) {
           const finishedAt = Date.now();
@@ -1153,12 +1236,13 @@ export class Agent {
         }
         const overflow = contextOverflowOf(error);
         if (overflow && !signal?.aborted) {
-          if (contextRecoveries < 1 && this.settings().strategy !== "off") {
+          if (contextRecoveries < MAX_CONTEXT_RECOVERIES && this.settings().strategy !== "off") {
             contextRecoveries += 1;
             const before = this.contextUsage().tokens;
             this.observedContextWindow = overflow.contextWindow ?? Math.max(1024, Math.floor(Math.min(this.settings().contextWindow, before) * 0.75));
             const recovery = this.settings();
             this.compact({force: true, protectRecentTools: 0, protectTailTokens: 0, targetBudget: Math.max(256, Math.floor((recovery.contextWindow - (recovery.outputReserveTokens ?? 0)) * 0.6 * 4))});
+            if (this.contextUsage().tokens >= before) this.trimToWindow();
             await this.options.historyCheckpoint?.(this.history, "overflow-recovery");
             await this.options.trace?.("context.recovery", {beforeTokens: before, afterTokens: this.contextUsage().tokens, window: this.observedContextWindow});
             if (this.contextUsage().tokens < before) { step -= 1; continue; }
@@ -1188,7 +1272,7 @@ export class Agent {
 
       const assistant: ChatMessage = {
         role: "assistant",
-        content: streamed.content || null,
+        content: streamed.content.trim() ? streamed.content : null,
       };
       const incomplete = finishReason !== "stop" && finishReason !== "tool_calls";
       if (!incomplete && streamed.toolCalls.length > 0) {
@@ -1199,7 +1283,7 @@ export class Agent {
         if (streamed.thinkingBlocks.length > 0)
           assistant.thinking_blocks = streamed.thinkingBlocks;
       }
-      this.messages.push(assistant);
+      if (assistant.content !== null || assistant.tool_calls?.length) this.messages.push(assistant);
       if (this.lastUsage && this.lastUsage.count !== this.messages.length) {
         this.lastUsage = {
           tokens: this.lastUsage.tokens,
@@ -1217,30 +1301,23 @@ export class Agent {
 
       // A truncated tool call is not an executable instruction. Keep its visible text,
       // but never persist an unmatched protocol call or dispatch a partial side effect.
-      const emptyToolCalls = finishReason === "tool_calls" && streamed.toolCalls.length === 0;
-      const cutOff = finishReason === "length";
-      if (
-        (emptyToolCalls || cutOff) &&
-        emptyTurnRecoveries < MAX_EMPTY_TURN_RECOVERIES &&
-        !signal?.aborted
-      ) {
-        // Gateways occasionally report `tool_calls` with the call name or arguments lost, and
-        // long tool arguments can hit the output cap. Neither is an answer: tell the model what
-        // happened and let it re-issue the call instead of ending the turn for the user.
-        emptyTurnRecoveries += 1;
-        if (!assistant.content) assistant.content = "[no valid tool call was received]";
+      const emptyToolTurn = finishReason === "tool_calls" && streamed.toolCalls.length === 0;
+      const truncated = finishReason === "length";
+      if ((emptyToolTurn || truncated) && turnRecoveries < MAX_TURN_RECOVERIES && step < stepBudget && !signal?.aborted) {
+        // The model clearly wanted to keep working (tool_calls with nothing parseable, or output cut by
+        // max_tokens, often because thinking consumed it). Do not end the turn: tell it what happened.
+        turnRecoveries += 1;
         this.messages.push({
           role: "user",
-          content: emptyToolCalls
-            ? "[omr] Your last reply ended with finish_reason=tool_calls but no valid tool call reached the runtime (function name or arguments were lost). Re-issue the intended tool call now with a valid function name and complete JSON arguments, or continue the analysis."
-            : "[omr] Your last reply was cut off by the output limit before it finished. Continue exactly where you stopped. If you were writing a tool call, keep its arguments shorter (write large scripts to a file in several smaller calls).",
+          content: emptyToolTurn
+            ? "[omr] Your last response ended with finish_reason=tool_calls but contained no valid tool call. Re-issue the tool call with complete JSON arguments, or give your final answer."
+            : "[omr] Your last response was cut off by the output token limit before it finished (any partial tool call was discarded). Think less, then issue the next tool call with compact arguments, or give your final answer.",
         });
-        await this.options.trace?.("turn.recovery", {step, finishReason, attempt: emptyTurnRecoveries});
+        await this.options.trace?.("turn.recovery", {step, reason: finishReason, attempt: turnRecoveries});
         await this.options.historyCheckpoint?.(this.history, "turn-recovery");
-        stepBudget += 1; // a recovery must not eat the step budget
         continue;
       }
-      if (incomplete || emptyToolCalls) {
+      if (incomplete || emptyToolTurn) {
         return {
           text: latestText || richestText, steps: step, toolCalls: totalToolCalls,
           aborted: false, status: "partial", finishReason, usage: turnUsage,
@@ -1283,7 +1360,7 @@ export class Agent {
         let args: Record<string, unknown> = {};
         let parseProblem: string | null = null;
         try {
-          const parsed: unknown = JSON.parse(call.function.arguments || "{}");
+          const parsed: unknown = JSON.parse(call.function.arguments);
           const record = asRecord(parsed);
           if (!record || Array.isArray(parsed)) parseProblem = "Tool arguments must be a JSON object.";
           else args = record;
@@ -1350,27 +1427,38 @@ export class Agent {
                 evidenceIds: [],
               };
             }
-            const blocked = loopGuard.check(
+            // The guard only nudges: the call still runs (state may have changed even when arguments did
+            // not), and the model is told it is repeating itself. It never ends or blocks the turn.
+            const nudge = loopGuard.check(
               item.name,
               item.args,
               item.readOnly,
             );
-            if (blocked) {
-              return {
+            let outcome: BrokerOutcome;
+            try {
+              outcome = await abortable(
+                this.broker.dispatch(
+                  item.name,
+                  item.args,
+                  signal,
+                  (message) => events.onToolProgress?.(item.call.id, message),
+                  catalogVersion,
+                ),
+                signal,
+              );
+            } catch (error) {
+              // A tool failing, timing out, or leaving an uncertain outcome is information for the model,
+              // not the end of the turn. (Uncertain side effects stay recorded and block blind repeats.)
+              const reason = error instanceof Error ? error.message : String(error);
+              outcome = {
                 tool: item.name,
-                text: blocked,
+                text: signal?.aborted ? "[cancelled by user]" : `[omr] ${item.name} did not complete: ${reason}`,
                 isError: true,
                 durationMs: 0,
                 evidenceIds: [],
               };
             }
-            const outcome = await this.broker.dispatch(
-              item.name,
-              item.args,
-              signal,
-              (message) => events.onToolProgress?.(item.call.id, message),
-              catalogVersion,
-            );
+            if (nudge && !signal?.aborted) outcome = { ...outcome, text: `${nudge}\n\n${outcome.text}` };
             loopGuard.record(
               item.name,
               item.args,
@@ -1384,6 +1472,7 @@ export class Agent {
         for (let wIdx = 0; wIdx < wave.length; wIdx += 1) {
           const item = wave[wIdx]!;
           const outcome = outcomes[wIdx]!;
+          if (!outcome.isError) stepToolSucceeded = true;
           if (!outcome.isError && progressBefore === undefined) for (const id of outcome.evidenceIds) {
             if (/^ev_[a-f0-9]{64}$/.test(id) && !this.progressEvidence.has(id)) { this.progressEvidence.add(id); stepMadeProgress = true; }
           }
@@ -1426,7 +1515,7 @@ export class Agent {
         });
       }
 
-      emptyTurnRecoveries = 0;
+      turnRecoveries = 0;
       flushPendingSteers(step);
       await this.options.historyCheckpoint?.(this.history, "tool-results");
       await events.onCheckpoint?.();
@@ -1434,9 +1523,12 @@ export class Agent {
 
       // Still working productively as the budget runs out: grant another block instead of
       // stopping with a partial answer that would need a manual "continue".
+      // "Still working" means measured progress OR any successfully executed tool call: shell and browser
+      // work (omr_run, camofox_evaluate) never produces REA Evidence, yet it is real work. Identical-call
+      // loops are already answered with an error by the LoopGuard, so they do not count as activity.
       if (
         step === stepBudget &&
-        stepMadeProgress &&
+        (stepMadeProgress || stepToolSucceeded) &&
         extensionsUsed < maxExtensions
       ) {
         extensionsUsed += 1;
@@ -1451,12 +1543,13 @@ export class Agent {
     }
 
     const base = richestText || latestText;
+    const capNote = maxExtensions > 0 ? ` (${maxSteps} steps x ${maxExtensions + 1} blocks)` : "";
     return {
-      text: `${base}\n\n[omr] step budget exhausted after ${stepBudget} model turns; answer is partial. Send \`continue\` to resume from this context, or raise OMR_MAX_STEPS / OMR_AUTO_EXTEND_STEPS.`.trim(),
+      text: `${base}\n\n[omr] step limit reached: ${stepBudget} model steps in one turn${capNote}. Send \`continue\` to resume from this context, or raise OMR_MAX_STEPS (steps per block, currently ${maxSteps}) / OMR_AUTO_EXTEND_STEPS (extra blocks, currently ${maxExtensions}).`.trim(),
       steps: stepBudget,
       toolCalls: totalToolCalls,
       aborted: false,
-      status: "partial", finishReason,
+      status: "partial", finishReason: "step_budget",
       usage: turnUsage,
     };
   }

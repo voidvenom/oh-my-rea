@@ -37,7 +37,9 @@ export const splitShellTokens = (input: string): string[] => {
 };
 
 export const toolTimeoutMs = (env: NodeJS.ProcessEnv): number => {
-  const parsed = Number(env["OMR_TOOL_TIMEOUT_MS"]);
+  const value = env["OMR_TOOL_TIMEOUT_MS"]?.trim();
+  if (value === "0") return 0;
+  const parsed = Number(value);
   return Number.isFinite(parsed) && parsed >= 1_000
     ? Math.trunc(parsed)
     : DEFAULT_TOOL_TIMEOUT_MS;

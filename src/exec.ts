@@ -1,11 +1,11 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { resources } from "./resources.js";
 import { terminateOwnedProcess } from "./ownedProcess.js";
 import {
   lstatSync,
   mkdirSync,
-  readFileSync,
+  createReadStream,
   realpathSync,
   renameSync,
   unlinkSync,
@@ -20,9 +20,16 @@ import {
   isAbsolute,
 } from "node:path";
 
-/** Hard ceilings for one `omr_run` invocation. */
+/**
+ * `omr_run` per-call timeout. The default only bounds a script that did not ask for more; hitting it returns
+ * an error result to the model (never ends the turn). The ceiling is opt-in via OMR_RUN_MAX_TIMEOUT_SEC.
+ */
 export const RUN_DEFAULT_TIMEOUT_SEC = 30;
-export const RUN_MAX_TIMEOUT_SEC = 300;
+export const runMaxTimeoutSec = (env: NodeJS.ProcessEnv = process.env): number => {
+  const parsed = Number(env["OMR_RUN_MAX_TIMEOUT_SEC"]);
+  // 2^31-1 ms is the largest delay a Node timer accepts; used as "no ceiling".
+  return Number.isFinite(parsed) && parsed >= 1 ? parsed : 2_147_483;
+};
 const STREAM_HEAD_BYTES = 32_768;
 const STREAM_TAIL_BYTES = 16_384;
 const RECORD_PREVIEW_CHARS = 4_000;
@@ -200,19 +207,23 @@ const saveSessionScript = (
   return null;
 };
 
-let netnsProbe: boolean | undefined;
+let netnsProbe: Promise<boolean> | undefined;
 
 /** Whether an unprivileged empty network namespace (`unshare -rn`) is available on this host. */
-export const networkIsolationAvailable = (): boolean => {
-  if (netnsProbe === undefined) {
-    const probe = spawnSync("unshare", ["-rn", "true"], {
-      stdio: "ignore",
-      timeout: 5_000,
-    });
-    netnsProbe = probe.status === 0;
-  }
-  return netnsProbe;
-};
+export const networkIsolationAvailable = (): Promise<boolean> =>
+  netnsProbe ??= new Promise((resolve) => {
+    const probe = spawn("unshare", ["-rn", "true"], { stdio: "ignore" });
+    const timer = setTimeout(() => {
+      probe.kill("SIGKILL");
+      resolve(false);
+    }, 5_000);
+    const finish = (available: boolean): void => {
+      clearTimeout(timer);
+      resolve(available);
+    };
+    probe.once("error", () => finish(false));
+    probe.once("close", (code) => finish(code === 0));
+  });
 
 /** Test hook: forget the cached namespace probe. */
 export const resetNetworkIsolationProbe = (): void => {
@@ -333,11 +344,12 @@ export const runSessionScript = async (
 
   const timeoutSec = Math.min(
     Math.max(request.timeoutSec ?? RUN_DEFAULT_TIMEOUT_SEC, 1),
-    RUN_MAX_TIMEOUT_SEC,
+    runMaxTimeoutSec(),
   );
   const args = (request.args ?? []).map(String);
   const wantNetwork = request.network === true;
-  const canIsolate = networkIsolationAvailable();
+  const canIsolate = !wantNetwork && await networkIsolationAvailable();
+  request.signal?.throwIfAborted();
   const networkIsolation: NetworkIsolation = wantNetwork
     ? "host"
     : canIsolate
@@ -355,7 +367,9 @@ export const runSessionScript = async (
 
   let sha256: string;
   try {
-    sha256 = createHash("sha256").update(readFileSync(resolved)).digest("hex");
+    const digest = createHash("sha256");
+    for await (const chunk of createReadStream(resolved, { signal: request.signal })) digest.update(chunk);
+    sha256 = digest.digest("hex");
   } catch {
     return { ok: false, error: `Unable to read script: ${request.script}` };
   }

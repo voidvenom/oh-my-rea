@@ -15,6 +15,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { ChatImageBlock, ChatMessage } from "./model.js";
 import { normalizeChatMessage, repairChatHistory } from "./history.js";
+import { LARGE_HISTORY_BYTES, readHistoryHeader, readHistoryTail, readLargeHistory } from "./historyFile.js";
 import { writeJsonAtomic } from "./durable.js";
 import { asArray, asRecord, asString } from "./values.js";
 import { VERSION } from "./version.js";
@@ -560,7 +561,7 @@ export const saveSessionHistory = async (
   let existingCustomTitle: string | null = options?.customTitle ?? null;
   if (!existingCustomTitle && existsSync(info.historyPath)) {
     try {
-      const prev = asRecord(JSON.parse(await readFile(info.historyPath, "utf8")));
+      const prev = (await readHistoryHeader(info.historyPath))?.fields;
       const ct = asString(prev?.["custom_title"]).trim();
       if (ct) existingCustomTitle = ct;
     } catch {
@@ -748,6 +749,43 @@ export const evidenceIdsInMessages = (
 };
 
 /** List recent sessions that have saved conversation history or non-empty reports. */
+const readHistoryDocument = async (path: string) => {
+  if ((await stat(path)).size > LARGE_HISTORY_BYTES) return readLargeHistory(path);
+  const fields = asRecord(JSON.parse(await readFile(path, "utf8")));
+  if (!fields) return null;
+  const entries = asArray(fields["messages"]);
+  return { fields, entries, count: entries.length, firstUser: undefined };
+};
+
+/** A bounded preview for the common startup selectors. Other selectors fall through to the picker lookup. */
+export const previewSavedSession = async (query: string, excludeId?: string, rootDir?: string) => {
+  const clean = query.trim().toLowerCase();
+  const latest = !clean || clean === "last" || clean === "latest";
+  const root = sessionsRootDir(rootDir);
+  const entries = await readdir(root).catch(() => []);
+  const names = latest ? entries.sort((a, b) => b.localeCompare(a)) : entries.filter((name) => name.toLowerCase() === clean);
+  for (const id of names) {
+    if (id === excludeId) continue;
+    const path = join(root, id, "history.json");
+    try {
+      const header = await readHistoryHeader(path);
+      if (!header) continue;
+      const records = await readHistoryTail(path);
+      const messages = records.flatMap((entry) => {
+        const message = normalizeChatMessage(entry);
+        return message ? [message] : [];
+      });
+      if (messages.length > 0) return { id, messages };
+      // A latest session can be empty or use a format the preview does not recognize.
+      // Let the regular loader resolve it, using its normal ordering and validation.
+      return null;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return null;
+    }
+  }
+  return null;
+};
+
 export const listRecentSessions = async (
   limit = 15,
   excludeId?: string,
@@ -769,11 +807,9 @@ export const listRecentSessions = async (
     const historyPath = join(dir, "history.json");
     const metaPath = join(dir, "omr.json");
     try {
-      const rawHist = await readFile(historyPath, "utf8").catch(() => "");
-      if (!rawHist) continue;
-      const parsed = asRecord(JSON.parse(rawHist));
-      const msgs = asArray(parsed?.["messages"]);
-      if (msgs.length === 0) continue;
+      const document = await readHistoryDocument(historyPath);
+      if (!document?.count) continue;
+      const { fields: parsed, entries: msgs, count, firstUser } = document;
       const rawMeta = await readFile(metaPath, "utf8").catch(() => "");
       const meta = rawMeta ? asRecord(JSON.parse(rawMeta)) : null;
       const target =
@@ -791,8 +827,8 @@ export const listRecentSessions = async (
 
       const derived = deriveSessionTitle(msgs, target, customTitle);
       const isFork = Boolean(asString(meta?.["forked_from"]));
-      if (msgs.length >= 20 && !isFork) {
-        const cloneSig = `${msgs.length}|${derived.userTurnCount}|${derived.toolCallCount}|${derived.title}|${derived.lastMessagePreview}`;
+      if (count >= 20 && !isFork) {
+        const cloneSig = `${count}|${derived.userTurnCount}|${derived.toolCallCount}|${derived.title}|${derived.lastMessagePreview}`;
         if (seenLargeClones.has(cloneSig)) continue;
         seenLargeClones.add(cloneSig);
       }
@@ -805,10 +841,10 @@ export const listRecentSessions = async (
         dir,
         target,
         model,
-        messageCount: msgs.length,
+        messageCount: count,
         updatedAt,
-        title: derived.title,
-        firstUserPrompt: derived.firstTaskPrompt,
+        title: asString(parsed["title"]) || derived.title,
+        firstUserPrompt: firstUser ? stripInternalPromptNotes(firstUser) : derived.firstTaskPrompt,
         lastMessagePreview: derived.lastMessagePreview,
         userTurnCount: derived.userTurnCount,
         toolCallCount: derived.toolCallCount,
@@ -834,11 +870,16 @@ export const loadSavedSession = async (
   inFlight: boolean;
   /** Invalid or incomplete stored messages removed while repairing the protocol history. */
   droppedMessages: number;
+  archivedMessages: number;
 } | null> => {
-  const recent = await listRecentSessions(50, excludeId, rootDir);
-  if (recent.length === 0) return null;
   const clean = query.trim().toLowerCase();
   const numMatch = /^#?(\d+)$/.exec(clean);
+  // Every candidate costs a full read + JSON.parse of its history.json, so only list as many as the query
+  // can address: `last` is the first summary, `#N` is the Nth. Name/id/title queries need the whole window.
+  const isLast = !clean || clean === "last" || clean === "latest";
+  const wanted = isLast ? 1 : numMatch && Number(numMatch[1]) >= 1 ? Math.min(50, Number(numMatch[1])) : 50;
+  const recent = await listRecentSessions(wanted, excludeId, rootDir);
+  if (recent.length === 0) return null;
   const byIndex = numMatch ? recent[Number(numMatch[1]) - 1] : undefined;
   const match =
     !clean || clean === "last" || clean === "latest"
@@ -855,10 +896,10 @@ export const loadSavedSession = async (
         ));
   if (!match) return null;
   try {
-    const raw = await readFile(join(match.dir, "history.json"), "utf8");
-    const parsed = asRecord(JSON.parse(raw));
+    const document = await readHistoryDocument(join(match.dir, "history.json"));
+    if (!document?.count) return null;
     const entries: Array<ChatMessage | null> = [];
-    for (const entry of asArray(parsed?.["messages"])) {
+    for (const entry of document.entries) {
       const message = await parseStoredMessage(match.dir, entry);
       entries.push(message);
     }
@@ -866,8 +907,9 @@ export const loadSavedSession = async (
     return {
       summary: match,
       messages: repaired.messages,
-      inFlight: parsed?.["in_flight"] === true,
+      inFlight: document.fields["in_flight"] === true,
       droppedMessages: repaired.report.droppedMessages,
+      archivedMessages: document.count - document.entries.length,
     };
   } catch {
     return null;
@@ -1121,11 +1163,16 @@ export const writeOperatorDirective = async (
   return { agentsPath, sessionDirectivePath, backupPath };
 };
 
+/** Instruction files are prompt text on every turn, so they are bounded; the cut is reported, never silent. */
+export const PROJECT_INSTRUCTIONS_LIMIT = 24_000;
+
 export interface ProjectInstructions {
   readonly path: string;
-  /** Full instruction text (omr's own managed `/jb` block removed); never cut. */
+  /** Instruction text (omr's own managed `/jb` block removed), cut at {@link PROJECT_INSTRUCTIONS_LIMIT}. */
   readonly text: string;
+  /** Length of the full text before any cut. */
   readonly chars: number;
+  readonly truncated: boolean;
 }
 
 const stripManagedDirectiveBlock = (raw: string): string => {
@@ -1142,7 +1189,13 @@ const toProjectInstructions = (
 ): ProjectInstructions | null => {
   const text = stripManagedDirectiveBlock(raw).replace(/\r\n/g, "\n").trim();
   if (!text) return null;
-  return { path, text, chars: text.length };
+  const truncated = text.length > PROJECT_INSTRUCTIONS_LIMIT;
+  return {
+    path,
+    text: truncated ? text.slice(0, PROJECT_INSTRUCTIONS_LIMIT) : text,
+    chars: text.length,
+    truncated,
+  };
 };
 
 const instructionCache = new Map<

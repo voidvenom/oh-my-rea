@@ -25,6 +25,7 @@ import {
   type TargetMagic,
 } from "./binaryArt.js";
 import { summarizeToolCall } from "./broker.js";
+import { takeEarlyInput } from "./earlyInput.js";
 import {
   copyTextToClipboard,
   isKlipperImagePlaceholder,
@@ -304,16 +305,22 @@ const THINKING_STAR_FRAMES = [
 ] as const;
 const IDLE_FLOW_GRACE_MS = 3_000;
 const FLOW_INTERVAL_MS = 105;
-const MAX_OUTPUT_CHARS = 256_000;
+const MAX_OUTPUT_CHARS = 64_000;
 const MAX_TIMELINE_ENTRIES = 600;
-const MAX_TIMELINE_CHARS = 1_500_000;
+const MAX_TIMELINE_CHARS = 240_000;
+const MAX_ENTRY_CHARS = 8_000;
+const MAX_TOOL_GROUP = 16;
+
+const timelineText = (text: string): string => {
+  if (text.length <= MAX_ENTRY_CHARS) return sanitizeText(text);
+  const slice = Math.floor(MAX_ENTRY_CHARS / 2) - 24;
+  return sanitizeText(`${text.slice(0, slice)}\n… [transcript preview] …\n${text.slice(-slice)}`);
+};
 const DOUBLE_ENTER_STEER_WINDOW_MS = 650;
 /** Inactivity gap after which an unterminated bracketed paste is flushed (large pastes arrive in bursts while the UI repaints). */
 const PASTE_SAFETY_TIMEOUT_MS = 2_000;
 /** How long an incomplete escape sequence is held waiting for its continuation before a lone ESC is treated as the Esc key. */
 const ESC_SEQUENCE_WAIT_MS = 40;
-/** Bare Ctrl+C while a turn is running only arms; a second press within this window interrupts. */
-const BUSY_CTRL_C_WINDOW_MS = 2_200;
 const MAX_STAGED_IMAGES = 6;
 const EVIDENCE_ID_EXTRACT_RE = /\bev_[0-9a-f]{64}\b/g;
 
@@ -760,10 +767,13 @@ export class TerminalUi {
     if (process.stdin.isTTY) process.stdin.setRawMode(true);
     process.stdin.resume();
     process.stdin.setEncoding("utf8");
+    // Take over from the pre-load capture in the same tick as attaching our listener, so no chunk is lost.
+    const typedAhead = takeEarlyInput();
     process.stdin.on("data", this.onData);
     this.stdout.on("resize", this.onResize);
     this.syncFlowTimer();
     this.paint();
+    if (typedAhead) this.onData(typedAhead);
   }
 
   stop(): void {
@@ -1000,21 +1010,21 @@ export class TerminalUi {
   addUser(text: string): void {
     this.closeActiveStreams();
     this.outputDrawerOpen = false;
-    this.timeline.push({ kind: "user", text: sanitizeText(text), rev: 1 });
+    this.timeline.push({ kind: "user", text: timelineText(text), rev: 1 });
     this.trimTimeline();
     this.scroll = 0;
     this.paint();
   }
 
   addSystem(text: string): void {
-    this.timeline.push({ kind: "system", text: sanitizeText(text), rev: 1 });
+    this.timeline.push({ kind: "system", text: timelineText(text), rev: 1 });
     this.trimTimeline();
     this.scroll = 0;
     this.paint();
   }
 
   addError(text: string): void {
-    this.timeline.push({ kind: "error", text: sanitizeText(text), rev: 1 });
+    this.timeline.push({ kind: "error", text: timelineText(text), rev: 1 });
     this.trimTimeline();
     this.scroll = 0;
     this.paint();
@@ -1038,7 +1048,7 @@ export class TerminalUi {
     if (!clean) return;
     const chunkWords = clean.trim() ? clean.trim().split(/\s+/).length : 0;
     this.reasoningEntry.words += chunkWords;
-    this.reasoningEntry.text += clean;
+    this.reasoningEntry.text = timelineText(this.reasoningEntry.text + clean);
     this.reasoningEntry.rev += 1;
     this.scroll = 0;
     this.schedule();
@@ -1069,7 +1079,7 @@ export class TerminalUi {
       this.streamEndedWithCr && delta.startsWith("\n") ? delta.slice(1) : delta;
     this.streamEndedWithCr = delta.endsWith("\r");
     if (slice.length > 0) {
-      this.streamEntry.text += sanitizeText(slice);
+      this.streamEntry.text = timelineText(this.streamEntry.text + slice);
       this.streamEntry.rev += 1;
     }
     this.scroll = 0;
@@ -1082,7 +1092,7 @@ export class TerminalUi {
     if (!this.streamEntry && text.trim().length > 0) {
       this.timeline.push({
         kind: "assistant",
-        text: sanitizeText(text),
+        text: timelineText(text),
         streaming: false,
         meta: meta ?? null,
         rev: 1,
@@ -1095,7 +1105,7 @@ export class TerminalUi {
     this.streamEntry = null;
     if (!entry) return;
     entry.streaming = false;
-    if (text) entry.text = sanitizeText(text);
+    if (text) entry.text = timelineText(text);
     if (meta !== undefined) entry.meta = meta;
     entry.rev += 1;
     if (entry.text.trim().length === 0) {
@@ -1136,7 +1146,7 @@ export class TerminalUi {
       evidenceIds: [],
     };
     const last = this.timeline.at(-1);
-    if (last?.kind === "tools") {
+    if (last?.kind === "tools" && last.calls.length < MAX_TOOL_GROUP) {
       last.calls.push(item);
       last.rev += 1;
     } else {
@@ -1231,6 +1241,7 @@ export class TerminalUi {
     messages: readonly ChatMessage[],
     options?: { readonly bannerText?: string | undefined },
   ): void {
+    messages = messages.slice(-240);
     this.closeActiveStreams();
     this.outputDrawerOpen = false;
     this.outputExpanded = false;
@@ -1257,7 +1268,7 @@ export class TerminalUi {
       if (msg.role === "system" || msg.role === "tool") continue;
 
       if (msg.role === "user") {
-        const rawContent = typeof msg.content === "string" ? msg.content : "";
+        const rawContent = typeof msg.content === "string" ? timelineText(msg.content) : "";
         const cleaned = stripInternalPromptNotes(rawContent);
         if (!cleaned && (!msg.images || msg.images.length === 0)) continue;
 
@@ -1287,6 +1298,7 @@ export class TerminalUi {
         });
         if (cleaned && this.history.at(-1) !== cleaned) {
           this.history.push(cleaned);
+          if (this.history.length > 200) this.history.shift();
         }
         continue;
       }
@@ -1304,7 +1316,7 @@ export class TerminalUi {
           }
         }
         if (reasoningParts.length > 0) {
-          const thoughtText = sanitizeText(reasoningParts.join("\n\n"));
+          const thoughtText = timelineText(reasoningParts.join("\n\n"));
           const words = thoughtText
             .trim()
             .split(/\s+/)
@@ -1324,7 +1336,7 @@ export class TerminalUi {
         if (typeof msg.content === "string" && msg.content.trim().length > 0) {
           this.timeline.push({
             kind: "assistant",
-            text: sanitizeText(msg.content.replace(/^\n+/, "")),
+            text: timelineText(msg.content).replace(/^\n+/, ""),
             streaming: false,
             meta: null,
             rev: 1,
@@ -1375,16 +1387,14 @@ export class TerminalUi {
             });
           }
 
-          const prev = this.timeline.at(-1);
-          if (prev?.kind === "tools") {
-            prev.calls.push(...calls);
-            prev.rev += 1;
-          } else {
-            this.timeline.push({
-              kind: "tools",
-              calls,
-              rev: 1,
-            });
+          for (const call of calls) {
+            const prev = this.timeline.at(-1);
+            if (prev?.kind === "tools" && prev.calls.length < MAX_TOOL_GROUP) {
+              prev.calls.push(call);
+              prev.rev += 1;
+            } else {
+              this.timeline.push({ kind: "tools", calls: [call], rev: 1 });
+            }
           }
         }
       }
@@ -1542,30 +1552,30 @@ export class TerminalUi {
   }
 
   /**
-   * `final` is set only by the escape-wait timer: whatever is left is then interpreted as typed
-   * (a lone ESC becomes the Esc key). Otherwise an incomplete escape sequence at the end of a
-   * chunk is held and joined with the next chunk, so a mouse/arrow/paste marker split across
-   * reads can never turn into a phantom Esc (which cancels the running turn) or stray text.
+   * Incomplete escape sequences wait briefly for the next chunk. Only a lone Esc
+   * becomes a key when the wait expires.
    */
-  private handleText(input: string, final = false): void {
+  private handleText(input: string): void {
     let text = input;
     if (this.escCarry && !this.pasteMode) {
-      text = this.escCarry + text;
+      if (input !== "\x03") text = this.escCarry + text;
       this.escCarry = "";
     }
     this.clearEscCarryTimer();
     while (text.length > 0) {
       if (this.pasteMode) {
-        // Search the joined buffer so a closing marker split across chunks is still found.
-        const joined = this.pasteBuffer + text;
-        const end = joined.indexOf(`${ESC}201~`);
+        const close = `${ESC}201~`;
+        // Only the end of the previous chunk can contain the start of a split marker.
+        const boundary = Math.max(0, this.pasteBuffer.length - close.length + 1);
+        const joined = this.pasteBuffer.slice(boundary) + text;
+        const end = joined.indexOf(close);
         if (end < 0) {
-          this.pasteBuffer = joined;
+          this.pasteBuffer += text;
           this.armPasteSafetyTimer();
           return;
         }
-        this.pasteBuffer = joined.slice(0, end);
-        text = joined.slice(end + 6);
+        this.pasteBuffer = this.pasteBuffer.slice(0, boundary) + joined.slice(0, end);
+        text = joined.slice(end + close.length);
         this.flushPasteBuffer();
         continue;
       }
@@ -1647,16 +1657,13 @@ export class TerminalUi {
           text = text.slice(match[0].length);
           continue;
         }
-        if (
-          !final &&
-          /^\x1b(?:\x1b)?(?:\[\[?[0-9;?<]*|O)?$/.test(text)
-        ) {
+        if (/^\x1b(?:\x1b)?(?:\[\[?[0-9;?<]*|O)?$/.test(text)) {
           this.escCarry = text;
           this.escCarryTimer = setTimeout(() => {
             this.escCarryTimer = null;
             const carried = this.escCarry;
             this.escCarry = "";
-            if (carried) this.handleText(carried, true);
+            if (carried === "\x1b") this.handleKey(carried);
           }, ESC_SEQUENCE_WAIT_MS);
           this.escCarryTimer.unref?.();
           return;
@@ -2276,15 +2283,8 @@ export class TerminalUi {
           return;
         }
         if (this.busy) {
-          // A stray Ctrl+C (e.g. meant as "copy" for a terminal-native selection) must not kill a
-          // long-running turn: the first press arms, the second within the window interrupts.
-          if (Date.now() < this.ctrlCArmedUntil) {
-            this.ctrlCArmedUntil = 0;
-            this.options.onInterrupt();
-            return;
-          }
-          this.ctrlCArmedUntil = Date.now() + BUSY_CTRL_C_WINDOW_MS;
-          break;
+          this.options.onInterrupt();
+          return;
         }
         if (this.paletteOpen) {
           this.paletteOpen = false;
@@ -3542,7 +3542,7 @@ export class TerminalUi {
         : undefined;
 
     if (line) {
-      this.history.push(line);
+      this.history.push(timelineText(line));
       if (this.history.length > 200) this.history.shift();
     }
     this.historyIndex = -1;
@@ -4686,7 +4686,7 @@ export class TerminalUi {
         this.binaryMode !== "off"
           ? `${renderBinaryPulse(this.tick, this.status.magic?.bytes ?? null, t, 6)} `
           : "";
-      rightRendered = `${pulse}${t.neonCyan}${spin} ${this.busy}${elapsed}${t.reset} ${Date.now() < this.ctrlCArmedUntil ? `${t.amber}${t.bold}ctrl+c again to stop${t.reset}` : `${t.muted}(esc cancel)${t.reset}`}`;
+      rightRendered = `${pulse}${t.neonCyan}${spin} ${this.busy}${elapsed}${t.reset} ${t.muted}(esc cancel)${t.reset}`;
     } else if (Date.now() < this.ctrlCArmedUntil) {
       rightRendered = `${t.amber}${t.bold}! ctrl+c again to exit${t.reset}`;
     } else {

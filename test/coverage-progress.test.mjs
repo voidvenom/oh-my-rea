@@ -85,15 +85,16 @@ describe("measured progress and explicit coverage", () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
-  it("extends model steps for new facts while duplicate or merely successful work cannot extend", async () => {
+  it("extends model steps while tool calls keep succeeding (new facts, duplicates, plain exits) but never for failing calls", async () => {
     const root = await mkdtemp(join(tmpdir(), "omr-progress-budget-"));
     try {
-      for (const mode of ["novel", "duplicate", "exit-only"]) {
+      for (const mode of ["novel", "duplicate", "exit-only", "failing"]) {
         const dir = join(root, mode); await mkdir(dir); const store = new ExecutionStore(mode, dir); const progress = new ProgressTracker(mode, store);
-        const broker = { definitions: () => [], isReadOnly: () => true, dispatch: async (_name, args) => { const payload = mode === "exit-only" ? { ok: true } : evidence("inspect", { n: mode === "duplicate" ? 1 : args.n }); await invoke(store, payload); return { tool: "inspect", text: JSON.stringify(payload), isError: false, durationMs: 0, evidenceIds: [] }; } };
+        const broker = { definitions: () => [], isReadOnly: () => true, dispatch: async (_name, args) => { const payload = mode === "exit-only" || mode === "failing" ? { ok: true } : evidence("inspect", { n: mode === "duplicate" ? 1 : args.n }); await invoke(store, payload); return { tool: "inspect", text: JSON.stringify(payload), isError: mode === "failing", durationMs: 0, evidenceIds: [] }; } };
         const model = new FakeModel((_messages,_tools,index) => index < 3 ? { toolCalls: [{ name: "inspect", arguments: { n: index } }] } : { content: "done" });
         const agent = new Agent(model, broker, { systemPrompt: "fixture", maxSteps: 2, autoExtendSteps: 1, progressEpoch: () => progress.epoch });
-        const turn = await agent.run("inspect"); assert.equal(turn.status, mode === "novel" ? "completed" : "partial"); assert.equal(turn.steps, mode === "novel" ? 4 : 2);
+        const turn = await agent.run("inspect"); assert.equal(turn.status, mode === "failing" ? "partial" : "completed", mode); assert.equal(turn.steps, mode === "failing" ? 2 : 4, mode);
+        if (mode === "failing") assert.equal(turn.finishReason, "step_budget");
       }
     } finally { await rm(root, { recursive: true, force: true }); }
   });

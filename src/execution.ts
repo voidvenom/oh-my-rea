@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { open, readFile, stat } from "node:fs/promises";
+import { open, stat } from "node:fs/promises";
+import { createInterface } from "node:readline";
 import { join } from "node:path";
 import type { ChatMessage } from "./model.js";
 import { asArray, asRecord, asString } from "./values.js";
@@ -62,6 +63,8 @@ const canonical = (value: unknown): string => {
 export const argumentDigest = (value: unknown): string =>
   createHash("sha256").update(canonical(JSON.parse(JSON.stringify(value ?? null)))).digest("hex");
 
+const projectionDigest = (message: string): string => createHash("sha256").update(message).digest("hex");
+
 const eventOf = (line: string): ExecutionEvent => {
   const raw = asRecord(JSON.parse(line));
   if (raw?.["schema"] !== 1 || !Number.isInteger(raw["seq"]) || typeof raw["id"] !== "string" || typeof raw["at"] !== "string" || typeof raw["sessionId"] !== "string" || typeof raw["type"] !== "string" || !asRecord(raw["data"])) {
@@ -69,6 +72,26 @@ const eventOf = (line: string): ExecutionEvent => {
   }
   return raw as unknown as ExecutionEvent;
 };
+
+async function* readNativeRecords(path: string): AsyncGenerator<Record<string, unknown>> {
+  const stream = createReadStream(path, { encoding: "utf8" });
+  const lines = createInterface({ input: stream, crlfDelay: Infinity });
+  try {
+    for await (const line of lines) {
+      try {
+        const record = asRecord(JSON.parse(line));
+        if (record) yield record;
+      } catch {
+        // Native journals may contain a partially written last record.
+      }
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  } finally {
+    lines.close();
+    stream.destroy();
+  }
+}
 
 /** Explicit replay/export API; normal writes retain only digests and pending intents in memory. */
 export async function* readExecutionEvents(path: string): AsyncGenerator<ExecutionEvent> {
@@ -125,15 +148,19 @@ export class ExecutionStore {
               if (newline >= 0) { boundary = offset + newline + 1; break; }
               boundary = 0;
             }
-            const suffix = Buffer.alloc(info.size - boundary);
-            let read = 0;
-            while (read < suffix.length) {
-              const chunk = await file.read(suffix, read, suffix.length - read, boundary + read);
-              if (chunk.bytesRead === 0) throw new Error("Execution trace changed while recovering a partial record");
-              read += chunk.bytesRead;
-            }
             const archive = await open(`${this.path}.partial-${randomUUID()}`, "wx", 0o600);
-            try { await archive.writeFile(suffix); await archive.sync(); } finally { await archive.close(); }
+            try {
+              const chunk = Buffer.alloc(64 * 1024);
+              let position = boundary;
+              while (position < info.size) {
+                const size = Math.min(chunk.length, info.size - position);
+                const { bytesRead } = await file.read(chunk, 0, size, position);
+                if (!bytesRead) throw new Error("Execution trace changed while recovering a partial record");
+                await archive.writeFile(chunk.subarray(0, bytesRead));
+                position += bytesRead;
+              }
+              await archive.sync();
+            } finally { await archive.close(); }
             await file.truncate(boundary); await file.sync();
           }
         } finally { await file.close(); }
@@ -164,7 +191,7 @@ export class ExecutionStore {
     }
     const scope = asString(event.data["scope"]);
     if (event.type === "conversation.append" || event.type === "projection.reset") {
-      const hashes = asArray(event.data["messages"]).map(argumentDigest);
+      const hashes = asArray(event.data["messages"]).map(message => projectionDigest(JSON.stringify(message)));
       this.projections.set(scope, event.type === "projection.reset" ? hashes : [...(this.projections.get(scope) ?? []), ...hashes]);
     }
     if (this.observers.size) {
@@ -206,21 +233,21 @@ export class ExecutionStore {
   async captureConversation(scope: string, messages: readonly ChatMessage[], reason: string): Promise<void> {
     let writer = this.historyWriters.get(scope);
     if (!writer) { writer = new ConcurrencyLimiter(1); this.historyWriters.set(scope, writer); }
-    const snapshot = structuredClone(messages);
-    await writer.run(() => this.captureProjection(scope, snapshot, reason));
+    // Capture before waiting for the writer. Only changed records need to be parsed and published.
+    const projection = messages.filter(message => message.role !== "system").map(message => JSON.stringify(message));
+    await writer.run(() => this.captureProjection(scope, projection, reason));
   }
 
-  private async captureProjection(scope: string, messages: readonly ChatMessage[], reason: string): Promise<void> {
+  private async captureProjection(scope: string, projection: readonly string[], reason: string): Promise<void> {
     await this.initialize();
-    const projection = messages.filter((message) => message.role !== "system");
-    const hashes = projection.map(argumentDigest);
+    const hashes = projection.map(projectionDigest);
     const previous = this.projections.get(scope) ?? [];
     let common = 0;
     while (common < previous.length && common < hashes.length && previous[common] === hashes[common]) common++;
     if (common === previous.length && common === hashes.length) return;
-    await this.append(common === previous.length ? "conversation.append" : "projection.reset", {
-      scope, reason, ...(common === previous.length ? {messages: projection.slice(common)} : {messages: projection}),
-    });
+    const append = common === previous.length;
+    const messages = projection.slice(append ? common : 0).map(message => JSON.parse(message) as ChatMessage);
+    await this.append(append ? "conversation.append" : "projection.reset", { scope, reason, messages });
   }
 
   async unresolved(): Promise<readonly InvocationIntent[]> { await this.initialize(); await this.queue; return [...this.pending.values()]; }
@@ -276,14 +303,25 @@ export class ExecutionStore {
   /** Native journal candidates aid inspection; a digest match alone cannot prove call ownership. */
   async reconcileNativeJournal(path: string): Promise<ReadonlyArray<{intent: InvocationIntent; candidates: readonly Record<string, unknown>[]}>> {
     const pending = await this.unresolved();
-    let lines: string[];
-    try { lines = (await readFile(path, "utf8")).split("\n"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; lines = []; }
-    const records = lines.filter((line) => line.trim()).flatMap((line) => {try {const record = asRecord(JSON.parse(line)); return record ? [record] : [];} catch {return [];}});
-    return pending.map((intent) => {
-      const calls = records.filter((record) => record["type"] === "tool.call" && record["tool"] === intent.tool && record["args_digest"] === intent.argsDigest);
-      const ids = new Set(calls.map((call) => call["call_id"]));
-      return {intent, candidates: records.filter((record) => record["type"] === "tool.result" && ids.has(record["call_id"]))};
-    });
+    const matches = pending.map(intent => ({ intent, candidates: [] as Record<string, unknown>[] }));
+    if (!matches.length) return matches;
+    const calls = new Map<unknown, Set<(typeof matches)[number]>>();
+    for await (const record of readNativeRecords(path)) {
+      if (record["type"] !== "tool.call") continue;
+      const id = record["call_id"];
+      for (const match of matches) {
+        if (record["tool"] !== match.intent.tool || record["args_digest"] !== match.intent.argsDigest) continue;
+        let belonging = calls.get(id);
+        if (!belonging) { belonging = new Set(); calls.set(id, belonging); }
+        belonging.add(match);
+      }
+    }
+    if (!calls.size) return matches;
+    for await (const record of readNativeRecords(path)) {
+      if (record["type"] !== "tool.result") continue;
+      for (const match of calls.get(record["call_id"]) ?? []) match.candidates.push(record);
+    }
+    return matches;
   }
 
   async flush(): Promise<void> { await this.queue; }

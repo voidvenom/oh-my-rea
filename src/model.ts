@@ -185,10 +185,12 @@ export class ModelStallError extends Error {
   }
 }
 
-const MAX_RETRIES = 3;
+/** Transient HTTP/stream failures retried (with jittered exponential backoff up to 60s) before a request fails. */
+const DEFAULT_MAX_RETRIES = 12;
 const MAX_RETRY_DELAY_MS = 60_000;
 const DEFAULT_PING_INTERVAL_MS = 1_500;
-const DEFAULT_MAX_NETWORK_WAIT_MS = 15 * 60 * 1_000;
+/** 0 / unset = keep probing until the network returns or the user aborts. */
+const DEFAULT_MAX_NETWORK_WAIT_MS = Number.POSITIVE_INFINITY;
 const RETRYABLE_STATUS = new Set([
   408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 529,
 ]);
@@ -540,8 +542,8 @@ interface Watchdog {
 }
 
 /**
- * Inactivity watchdog: aborts only when no bytes arrive for `idleMs`, so long
- * high-effort reasoning streams are never cut off while they keep producing data.
+ * Inactivity watchdog: streamed reasoning and tool deltas count as progress.
+ * Transport heartbeats alone do not keep a stuck generation alive.
  */
 const createWatchdog = (idleMs: number, parent?: AbortSignal): Watchdog => {
   const controller = new AbortController();
@@ -549,12 +551,13 @@ const createWatchdog = (idleMs: number, parent?: AbortSignal): Watchdog => {
   const fire = (): void => {
     controller.abort(
       new ModelStallError(
-        `model stream stalled: no data received for ${Math.round(idleMs / 1000)}s (raise OMR_TIMEOUT_MS for slow models)`,
+        `model stream stalled: no response progress for ${Math.round(idleMs / 1000)}s (raise OMR_TIMEOUT_MS for slow models)`,
       ),
     );
   };
   const touch = (): void => {
     if (controller.signal.aborted) return;
+    if (idleMs <= 0) return;
     if (timer) clearTimeout(timer);
     timer = setTimeout(fire, idleMs);
     timer.unref?.();
@@ -576,26 +579,27 @@ const createWatchdog = (idleMs: number, parent?: AbortSignal): Watchdog => {
 /** Read a Server-Sent Events body line by line, feeding each `data:` payload to `onData`. */
 const readSse = async (
   body: ReadableStream<Uint8Array>,
-  watchdog: Watchdog,
-  onData: (data: string) => void,
+  onData: (data: string) => boolean | void,
 ): Promise<void> => {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  const flushLine = (raw: string): void => {
+  const flushLine = (raw: string): boolean | void => {
     const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
-    if (line.startsWith("data:")) onData(line.slice(5).trim());
+    if (line.startsWith("data:")) return onData(line.slice(5).trim());
   };
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      watchdog.touch();
       buffer += decoder.decode(value, { stream: true });
       let start = 0;
       let newline = buffer.indexOf("\n", start);
       while (newline >= 0) {
-        flushLine(buffer.slice(start, newline));
+        if (flushLine(buffer.slice(start, newline))) {
+          void reader.cancel().catch(() => {});
+          return;
+        }
         start = newline + 1;
         newline = buffer.indexOf("\n", start);
       }
@@ -604,7 +608,7 @@ const readSse = async (
     buffer += decoder.decode();
     for (const tail of buffer.split("\n")) flushLine(tail);
   } catch (error) {
-    await reader.cancel().catch(() => {});
+    void reader.cancel().catch(() => {});
     throw error;
   } finally {
     reader.releaseLock();
@@ -658,7 +662,7 @@ const callsFromMessage = (message: unknown): ChatToolCall[] => {
       type: "function",
       function: {
         name,
-        arguments: asString(fn["arguments"], "{}"),
+        arguments: asString(fn["arguments"]),
       },
     });
   });
@@ -1124,7 +1128,7 @@ export class ModelClient implements ModelPort {
       method: "POST",
       headers,
       body: JSON.stringify(payload),
-      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(this.config.timeoutMs)]) : AbortSignal.timeout(this.config.timeoutMs),
+      signal: this.config.timeoutMs > 0 ? (signal ? AbortSignal.any([signal, AbortSignal.timeout(this.config.timeoutMs)]) : AbortSignal.timeout(this.config.timeoutMs)) : (signal ?? null),
     });
     if (!response.ok) {
       const detail = (await response.text().catch(() => "")).slice(0, 300);
@@ -1215,6 +1219,7 @@ export class ModelClient implements ModelPort {
   private async streamRequest(messages: ChatMessage[], tools: ToolDefinition[], signal: AbortSignal | undefined, onText: (delta: string) => void, onReasoning?: (delta: string) => void, onRetry?: (notice: RetryNotice) => void, onNetworkStatus?: (notice: NetworkStatusNotice) => void, onStreamReset?: () => void): Promise<StreamResult> {
     const notifyNetwork = onNetworkStatus ?? this.config.onNetworkStatus;
     let httpAttempt = 0;
+    const maxRetries = Math.max(0, Math.trunc(this.config.maxRetries ?? DEFAULT_MAX_RETRIES));
     let probeAttempt = 0;
     let outageStartedAt: number | null = null;
 
@@ -1262,18 +1267,20 @@ export class ModelClient implements ModelPort {
           );
           continue;
         }
-        if (
-          emitted ||
-          httpAttempt >= MAX_RETRIES ||
-          !isRetryableModelError(error)
-        ) {
+        // A stalled stream (no bytes for the idle window) is retried like any transient failure: the
+        // request is re-sent from the same history, and nothing was executed yet.
+        const stalled = error instanceof ModelStallError;
+        if (httpAttempt >= maxRetries || !(stalled || isRetryableModelError(error))) {
           throw error;
         }
+        // Output already streamed is discarded by the caller (reset) rather than blocking recovery;
+        // otherwise a mid-stream provider error after the first reasoning token ends the turn.
+        if (emitted) onStreamReset?.();
         const delayMs = retryDelayMs(httpAttempt, error);
         httpAttempt += 1;
         onRetry?.({
           attempt: httpAttempt,
-          maxRetries: MAX_RETRIES,
+          maxRetries,
           delayMs,
           reason: retryReason(error),
         });
@@ -1294,10 +1301,9 @@ export class ModelClient implements ModelPort {
       10,
       this.config.pingIntervalMs ?? DEFAULT_PING_INTERVAL_MS,
     );
-    const maxWaitMs = Math.max(
-      50,
-      this.config.maxNetworkWaitMs ?? DEFAULT_MAX_NETWORK_WAIT_MS,
-    );
+    const maxWaitMs = this.config.maxNetworkWaitMs
+      ? Math.max(50, this.config.maxNetworkWaitMs)
+      : DEFAULT_MAX_NETWORK_WAIT_MS;
     const probeFn =
       this.config.networkProbe ??
       ((url: string, sig?: AbortSignal) =>
@@ -1639,11 +1645,11 @@ export class ModelClient implements ModelPort {
     };
 
     let sawDone = false;
-    await readSse(body, watchdog, (data) => {
+    await readSse(body, (data) => {
       if (!data) return;
       if (data === "[DONE]") {
         sawDone = true;
-        return;
+        return true;
       }
       let parsed: unknown;
       try {
@@ -1656,6 +1662,7 @@ export class ModelClient implements ModelPort {
       if (record["error"] && asArray(record["choices"]).length === 0) {
         throw streamError("model", record["error"]);
       }
+      if (record["usage"]) watchdog.touch();
       usage = usageOf(record["usage"]) ?? usage;
       for (const value of asArray(record["choices"])) {
         const choice = asRecord(value);
@@ -1664,6 +1671,7 @@ export class ModelClient implements ModelPort {
         if (delta) {
           const thought = reasoningTextOf(delta);
           if (thought.length > 0) {
+            watchdog.touch();
             reasoning += thought;
             if (typeof delta["reasoning_content"] === "string")
               fieldReasoning += thought;
@@ -1671,12 +1679,14 @@ export class ModelClient implements ModelPort {
           }
           const text = delta["content"];
           if (typeof text === "string" && text.length > 0) {
+            watchdog.touch();
             content += text;
             onText(text);
           }
           for (const rawCall of asArray(delta["tool_calls"])) {
             const call = asRecord(rawCall);
             if (!call) continue;
+            watchdog.touch();
             const slot = resolveCallSlot(call);
             const fn = asRecord(call["function"]);
             const current = calls.get(slot) ?? {
@@ -1695,8 +1705,10 @@ export class ModelClient implements ModelPort {
             calls.set(slot, current);
           }
         }
-        if (typeof choice["finish_reason"] === "string")
+        if (typeof choice["finish_reason"] === "string") {
           finishReason = choice["finish_reason"];
+          watchdog.touch();
+        }
       }
     });
 
@@ -1706,7 +1718,7 @@ export class ModelClient implements ModelPort {
       .map(([index, call]) => ({
         id: call.id || `call_${index}`,
         type: "function",
-        function: { name: call.name, arguments: call.arguments || "{}" },
+        function: { name: call.name, arguments: call.arguments },
       }));
 
     if (!finishReason && !sawDone) {
@@ -1882,11 +1894,11 @@ export class ModelClient implements ModelPort {
     };
 
     let sawMessageStop = false;
-    await readSse(response.body, watchdog, (data) => {
+    await readSse(response.body, (data) => {
       if (!data) return;
       if (data === "[DONE]") {
         sawMessageStop = true;
-        return;
+        return true;
       }
       let parsed: unknown;
       try {
@@ -1897,11 +1909,13 @@ export class ModelClient implements ModelPort {
       const event = asRecord(parsed);
       if (!event) return;
       const type = asString(event["type"]);
+      if (type && type !== "ping") watchdog.touch();
 
       if (type === "error") {
         throw streamError("Anthropic", event["error"]);
       } else if (type === "message_stop") {
         sawMessageStop = true;
+        return true;
       } else if (type === "message_start") {
         mergeUsage(asRecord(event["message"])?.["usage"]);
       } else if (type === "content_block_start") {
