@@ -30,6 +30,7 @@ import { summarizeToolCall } from "./broker.js";
 import { normalizeTypedAhead, takeEarlyInput } from "./earlyInput.js";
 import { I18n, type LocalizedMessage, type MessageKey } from "./i18n/index.js";
 import { ledgerHealthLabel } from "./render.js";
+import type { UpdateInfo } from "./setup.js";
 import { linkAt, linkSpansForLines, type LinkSpan } from "./links.js";
 import {
   ClickCounter,
@@ -218,6 +219,7 @@ type TimelineEntry =
       cache?: EntryRenderCache;
     }
   | { kind: "system"; text: string; rev: number; startup?: boolean; localize?: LocalizedMessage; cache?: EntryRenderCache }
+  | { kind: "update"; text: string; info: UpdateInfo; rev: number; startup: true; cache?: EntryRenderCache }
   | { kind: "error"; text: string; rev: number; cache?: EntryRenderCache };
 
 /**
@@ -386,6 +388,10 @@ const basenameOf = (path: string): string =>
   path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
 
 const hline = (width: number): string => "─".repeat(Math.max(0, width));
+
+/** Startup notices (release notes, AGENTS.md, update box) keep the splash on screen. */
+const isStartupNotice = (entry: TimelineEntry): boolean =>
+  entry.kind === "update" || (entry.kind === "system" && entry.startup === true);
 
 const formatDuration = (ms: number): string =>
   ms < 1000 ? `${Math.max(0, Math.round(ms))}ms` : `${(ms / 1000).toFixed(1)}s`;
@@ -1107,6 +1113,28 @@ export class TerminalUi {
     this.paint();
   }
 
+  /**
+   * Shows (or updates in place) the boxed "Update Available" notice. On the splash it goes first so
+   * the notice budget never clips it; during a conversation it is appended as a new event.
+   */
+  showUpdate(info: UpdateInfo): void {
+    if (info.packages.length === 0) return;
+    const text = info.packages.map((pkg) => `${pkg.name} ${pkg.installed} → ${pkg.latest}`).join(", ");
+    const existing = this.timeline.find((entry) => entry.kind === "update");
+    if (existing && existing.kind === "update") {
+      existing.info = info;
+      existing.text = text;
+      existing.rev += 1;
+    } else {
+      const entry: TimelineEntry = { kind: "update", text, info, rev: 1, startup: true };
+      if (this.timeline.every(isStartupNotice)) this.timeline.unshift(entry);
+      else this.timeline.push(entry);
+      this.trimTimeline();
+      this.scroll = 0;
+    }
+    this.paint();
+  }
+
   addError(text: string): void {
     this.timeline.push({ kind: "error", text: timelineText(this.i18n, text), rev: 1 });
     this.trimTimeline();
@@ -1333,7 +1361,7 @@ export class TerminalUi {
     this.selection = null;
 
     // Preserve initial startup notices (AGENTS.md / active profile) at the very top
-    const startupNotices = this.timeline.filter((entry) => entry.kind === "system" && entry.startup);
+    const startupNotices = this.timeline.filter(isStartupNotice);
     this.timeline = [...startupNotices];
 
     // Map tool_call_id -> tool result message for pairing status, duration, and Evidence IDs
@@ -4148,8 +4176,11 @@ export class TerminalUi {
 
   private renderViewportLeft(width: number, height: number): string[] {
     // Release notes and other startup messages stay visible without replacing the empty-session splash.
-    if (this.timeline.every((entry) => entry.kind === "system" && entry.startup)) {
-      const noticeBudget = Math.min(Math.floor(height / 3), Math.max(0, height - 8));
+    if (this.timeline.every(isStartupNotice)) {
+      // The update box gets its own room on top of the notice budget, so it never clips release notes.
+      const update = this.timeline.find((entry) => entry.kind === "update");
+      const updateRows = update ? this.renderSingleEntry(update, width).length + 1 : 0;
+      const noticeBudget = Math.min(Math.floor(height / 3) + updateRows, Math.max(0, height - 8));
       const notices = this.renderTimelineLines(width).slice(0, noticeBudget);
       const hero = renderHeroLines({
         i18n: this.i18n,
@@ -4267,6 +4298,28 @@ export class TerminalUi {
     }
     for (const list of links.values()) list.sort((a, b) => a.from - b.from);
     this.frameLinks = links;
+  }
+
+  /** Amber-bordered "Update Available" box: one line per outdated package, then the update command. */
+  private renderUpdateBox(info: UpdateInfo, width: number): string[] {
+    const t = this.theme;
+    const inner = Math.max(8, width - 4);
+    const title = ` ⬆ ${this.i18n.t("update.title")} `;
+    const fittedTitle = truncateAnsi(title, Math.max(0, inner - 1));
+    const out = [
+      `${t.amber}╭─${t.bold}${fittedTitle}${t.reset}${t.amber}${hline(width - 3 - visibleWidth(fittedTitle))}╮${t.reset}`,
+    ];
+    const row = (content: string): string =>
+      `${t.amber}│${t.reset} ${padEndAnsi(content, inner)} ${t.amber}│${t.reset}`;
+    for (const pkg of info.packages) {
+      const body = this.i18n.t("update.body", { name: pkg.name, latest: pkg.latest, installed: pkg.installed });
+      for (const line of wrapPlain(body, inner, true)) {
+        out.push(row(`${t.fg}${line.replace(pkg.latest, `${t.bold}${t.fgBright}${pkg.latest}${t.reset}${t.fg}`)}${t.reset}`));
+      }
+    }
+    out.push(row(`${t.fg}${this.i18n.t("update.run")}${t.reset} ${t.neonCyan}${t.bold}omr update${t.reset}${t.muted} · /changelog${t.reset}`));
+    out.push(`${t.amber}╰${hline(width - 2)}╯${t.reset}`);
+    return out;
   }
 
   private isTickAnimatedEntry(entry: TimelineEntry): boolean {
@@ -4422,6 +4475,8 @@ export class TerminalUi {
           `${t.muted}· ${styleInlineMarkdown(sLine, t, t.muted)}${t.reset}`,
         );
       }
+    } else if (entry.kind === "update") {
+      out.push(...this.renderUpdateBox(entry.info, width));
     } else if (entry.kind === "error") {
       for (const eLine of wrapPlain(entry.text, Math.max(6, width - 3), true)) {
         out.push(`${t.crimson}✗ ${eLine}${t.reset}`);

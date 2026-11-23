@@ -104,7 +104,7 @@ omr update      # update omr and REA to the latest npm release
 omr setup       # re-check the environment
 ```
 
-omr uses a 24-hour registry cache. The first interactive launch with an empty cache starts a background check. Once that finishes, the next launch can show the installed and available versions. Set `OMR_NO_UPDATE_CHECK=1` to disable update checks and notices. CI suppresses automatic notices.
+Every interactive launch checks npm for newer omr and REA releases in the background, after the UI is already on screen. When a newer version exists, an **Update Available** box with the version and the `omr update` command appears in the same session, as soon as the registry answers. A result from an earlier check shows immediately and is updated in place. The check has a 3-second timeout and fails silently offline. To avoid hammering the registry, a launch within 60 seconds of the previous check reuses that result instead of asking again. The registry follows `npm_config_registry` if you use a mirror. Set `OMR_NO_UPDATE_CHECK=1` to disable update checks and notices. CI never checks.
 
 ## Changelog
 

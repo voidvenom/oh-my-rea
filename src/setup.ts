@@ -28,8 +28,15 @@ export const REA_PACKAGE = "rea-agents";
 const REA_NODE_RANGES: readonly [number, number, number][] = [[22, 23, 4], [24, 22, 1]];
 const REA_NODE_MIN_MAJOR = 26;
 const REA_NODE_MIN_MAJOR_RANGE: [number, number, number] = [26, 12, 1];
-const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
-const REGISTRY_TIMEOUT_MS = 4_000;
+/**
+ * Every interactive launch checks the registry in the background. This guard only stops a burst
+ * of launches (scripts, tmux layouts, crash loops) from hammering the registry: a check that ran
+ * less than a minute ago is reused instead of repeated.
+ */
+export const MIN_CHECK_INTERVAL_MS = 60 * 1000;
+/** Short registry timeout; a slow or offline registry silently yields no notice. */
+const REGISTRY_TIMEOUT_MS = 3_000;
+const DEFAULT_REGISTRY = "https://registry.npmjs.org";
 
 export type Version = readonly [number, number, number];
 
@@ -146,9 +153,21 @@ const writeCache = async (env: NodeJS.ProcessEnv, cache: UpdateCache): Promise<v
   }
 };
 
-const fetchLatest = async (name: string): Promise<string | null> => {
+/** npm's own `npm_config_registry` override (mirrors, private registries), else the public registry. */
+const registryBase = (env: NodeJS.ProcessEnv): string => {
+  const configured = env["npm_config_registry"]?.trim();
+  if (!configured) return DEFAULT_REGISTRY;
   try {
-    const response = await fetch(`https://registry.npmjs.org/${name}/latest`, {
+    const url = new URL(configured);
+    return url.protocol === "https:" || url.protocol === "http:" ? url.href.replace(/\/+$/, "") : DEFAULT_REGISTRY;
+  } catch {
+    return DEFAULT_REGISTRY;
+  }
+};
+
+const fetchLatest = async (env: NodeJS.ProcessEnv, name: string): Promise<string | null> => {
+  try {
+    const response = await fetch(`${registryBase(env)}/${name}/latest`, {
       signal: AbortSignal.timeout(REGISTRY_TIMEOUT_MS),
       headers: { accept: "application/json" },
     });
@@ -167,7 +186,7 @@ const refreshCache = async (
   reaProbe?: { path: string; mtimeMs: number },
 ): Promise<UpdateCache> => {
   const [[omr, rea], installed] = await Promise.all([
-    refreshRegistry ? Promise.all([fetchLatest(OMR_PACKAGE), fetchLatest(REA_PACKAGE)]) : [null, null],
+    refreshRegistry ? Promise.all([fetchLatest(env, OMR_PACKAGE), fetchLatest(env, REA_PACKAGE)]) : [null, null],
     reaProbe ? readReaVersionAsync(reaProbe.path, env) : null,
   ]);
   const latest: UpdateCache["latest"] = { ...previous?.latest };
@@ -206,39 +225,98 @@ const isNewer = (latest: string | undefined, installed: string | null): boolean 
   return a !== null && b !== null && compareVersions(a, b) > 0;
 };
 
-/**
- * One-line notice when the last daily check found newer packages. The registry
- * refresh runs in the background and is picked up on the next start, so startup
- * never waits on the network. Opt out with `OMR_NO_UPDATE_CHECK=1`.
- */
+/** One outdated package: what is installed and what the registry offers. */
+export interface OutdatedPackage {
+  readonly name: "omr" | "rea";
+  readonly installed: string;
+  readonly latest: string;
+}
+
+/** Packages with a newer registry release; shown as a boxed notice in the TUI and one line elsewhere. */
+export interface UpdateInfo {
+  readonly packages: readonly OutdatedPackage[];
+}
+
 const pendingRefreshes = new Map<string, Promise<UpdateCache>>();
 
 const english = async (): Promise<I18n> => (await import("./i18n/index.js")).englishI18n();
 
-const updateNoticeMessage = async (env: NodeJS.ProcessEnv): Promise<LocalizedMessage | null> => {
+const outdatedPackages = (cache: UpdateCache | null, installedRea: string | null): UpdateInfo | null => {
+  if (!cache) return null;
+  const packages: OutdatedPackage[] = [];
+  const omr = cache.latest[OMR_PACKAGE];
+  if (omr && isNewer(omr, VERSION)) packages.push({ name: "omr", installed: VERSION, latest: omr });
+  const rea = cache.latest[REA_PACKAGE];
+  if (rea && installedRea && isNewer(rea, installedRea)) packages.push({ name: "rea", installed: installedRea, latest: rea });
+  return packages.length > 0 ? { packages } : null;
+};
+
+const sameUpdate = (a: UpdateInfo | null, b: UpdateInfo | null): boolean =>
+  JSON.stringify(a?.packages ?? []) === JSON.stringify(b?.packages ?? []);
+
+export const updateNoticeText = (info: UpdateInfo, t: I18n["t"]): string =>
+  t("setup.updateAvailable", {
+    packages: info.packages.map((pkg) => `${pkg.name} ${pkg.installed} → ${pkg.latest}`).join(", "),
+  });
+
+/**
+ * Starts an update check without waiting on the network. `cached` is what the last check
+ * recorded; `refreshed` settles with the result of this launch's registry check (or the cached
+ * result again when the min-interval guard skipped it). Neither ever rejects.
+ * Opt out with `OMR_NO_UPDATE_CHECK=1`; CI never checks.
+ */
+const startUpdateCheck = async (
+  env: NodeJS.ProcessEnv,
+): Promise<{ cached: UpdateInfo | null; refreshed: Promise<UpdateInfo | null> } | null> => {
   if (env["OMR_NO_UPDATE_CHECK"] === "1" || env["CI"]) return null;
   const cache = await readCache(env);
-  const needsRegistry = !cache || Date.now() - cache.checkedAt >= CHECK_INTERVAL_MS;
+  // A future timestamp (clock moved back) counts as stale, so it cannot suppress checks.
+  const age = cache ? Date.now() - cache.checkedAt : Number.POSITIVE_INFINITY;
+  const needsRegistry = age < 0 || age >= MIN_CHECK_INTERVAL_MS;
   // A registry update can only update the active PATH install.
   const launcher = resolveReaLauncher(env);
   const path = launcher?.source === "path" ? launcher.path : undefined;
   const mtimeMs = path ? await stat(path).then((info) => info.mtimeMs, () => null) : null;
-  const rea = cache?.rea;
-  const installed = rea && rea.path === path && rea.mtimeMs === mtimeMs ? rea.version : null;
+  const installedFrom = (next: UpdateCache | null): string | null => {
+    const rea = next?.rea;
+    return rea && rea.path === path && rea.mtimeMs === mtimeMs ? rea.version : null;
+  };
+  const installed = installedFrom(cache);
+  const cached = outdatedPackages(cache, installed);
   const probe = path && mtimeMs !== null && !installed ? { path, mtimeMs } : undefined;
   const key = cachePath(env);
-  if ((needsRegistry || probe) && !pendingRefreshes.has(key)) {
-    const refresh = refreshCache(env, cache, needsRegistry, probe);
+  let refresh = pendingRefreshes.get(key);
+  if (!refresh && (needsRegistry || probe)) {
+    refresh = refreshCache(env, cache, needsRegistry, probe);
     pendingRefreshes.set(key, refresh);
     void refresh.finally(() => pendingRefreshes.delete(key)).catch(() => {});
   }
-  if (!cache) return null;
-  const outdated: string[] = [];
-  if (isNewer(cache.latest[OMR_PACKAGE], VERSION)) outdated.push(`omr ${VERSION} → ${cache.latest[OMR_PACKAGE]}`);
-  if (isNewer(cache.latest[REA_PACKAGE], installed)) outdated.push(`rea ${installed} → ${cache.latest[REA_PACKAGE]}`);
-  if (!outdated.length) return null;
-  const packages = outdated.join(", ");
-  return (t) => t("setup.updateAvailable", { packages });
+  const refreshed = refresh
+    ? refresh.then((next) => outdatedPackages(next, installedFrom(next)), () => cached)
+    : Promise.resolve(cached);
+  return { cached, refreshed };
+};
+
+/**
+ * Live update notices for the TUI: reports the cached result at once (when it already shows a newer
+ * release), then reports again as soon as this launch's background registry check finds a newer
+ * or different release, in the same session.
+ */
+export const watchUpdates = async (
+  env: NodeJS.ProcessEnv,
+  onUpdate: (info: UpdateInfo) => void,
+): Promise<void> => {
+  const check = await startUpdateCheck(env);
+  if (!check) return;
+  if (check.cached) onUpdate(check.cached);
+  const fresh = await check.refreshed;
+  if (fresh && !sameUpdate(fresh, check.cached)) onUpdate(fresh);
+};
+
+/** One-line notice from the cached result; the registry refresh continues in the background. */
+const updateNoticeMessage = async (env: NodeJS.ProcessEnv): Promise<LocalizedMessage | null> => {
+  const cached = (await startUpdateCheck(env))?.cached;
+  return cached ? (t) => updateNoticeText(cached, t) : null;
 };
 
 export const updateNotice = async (env: NodeJS.ProcessEnv = process.env, language?: I18n): Promise<string | null> => {
@@ -246,9 +324,19 @@ export const updateNotice = async (env: NodeJS.ProcessEnv = process.env, languag
   return message ? message((language ?? await english()).t) : null;
 };
 
-export const announceRelease = async (env: NodeJS.ProcessEnv, display: (message: LocalizedMessage) => void): Promise<void> => {
+/**
+ * Startup notices. With `onUpdate` (the TUI) update notices are live; without it (plain CLI output)
+ * only the cached result is printed, so a one-shot command never waits for the registry.
+ */
+export const announceRelease = async (
+  env: NodeJS.ProcessEnv,
+  display: (message: LocalizedMessage) => void,
+  onUpdate?: (info: UpdateInfo) => void,
+): Promise<void> => {
   await Promise.all([
-    updateNoticeMessage(env).then((notice) => { if (notice) display(notice); }),
+    onUpdate
+      ? watchUpdates(env, onUpdate)
+      : updateNoticeMessage(env).then((notice) => { if (notice) display(notice); }),
     import("./changelog.js").then(({ whatsNewMessage }) => whatsNewMessage(env)).then((notes) => { if (notes) display(notes); }),
   ]);
 };

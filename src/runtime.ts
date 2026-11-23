@@ -358,8 +358,10 @@ export const runOmr = async (
       ui.setBusy(null);
       output.fail(error instanceof Error ? error.message : String(error));
     });
+    // Runs after the first paint: the cached update result shows at once, and this launch's
+    // background registry check inserts or updates the boxed notice live when it answers.
     void initialization.then(() => import("./setup.js")).then(({ announceRelease }) =>
-      announceRelease(ctx.env, (notice) => ui.addSystem(notice, true)),
+      announceRelease(ctx.env, (notice) => ui.addSystem(notice, true), (info) => ui.showUpdate(info)),
     ).catch(() => {});
     if (!resumeLine) {
       void initialization.then(() => ctx.ensureConnected()).catch(() => {});

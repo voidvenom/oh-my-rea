@@ -24,6 +24,7 @@
  */
 import { spawn, spawnSync } from "node:child_process";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
 import { arch, cpus, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -70,6 +71,13 @@ await new Promise((ready) => hanging.listen(0, "127.0.0.1", ready));
 const hangingPort = hanging.address().port;
 
 const pkg = JSON.parse(await readFile(join(here, "..", "package.json"), "utf8"));
+// Every launch refreshes the update cache once it is a minute old; answer from loopback so samples
+// measure the background check without depending on (or calling) the public npm registry.
+const registry = createHttpServer((request, response) => {
+  response.writeHead(200, { "content-type": "application/json" });
+  response.end(JSON.stringify({ version: request.url.includes("oh-my-rea") ? pkg.version : "0.0.1" }));
+});
+await new Promise((ready) => registry.listen(0, "127.0.0.1", ready));
 const writeConfig = async (dir, model, withCache) => {
   await mkdir(join(dir, "rea"), { recursive: true });
   await writeFile(join(dir, "rea", "omr-model.json"), `${JSON.stringify(model)}\n`);
@@ -90,6 +98,7 @@ const baseEnv = {
   XDG_DATA_HOME: join(root, "data"),
   XDG_STATE_HOME: join(root, "state"),
   BENCH_KEY: "bench",
+  npm_config_registry: `http://127.0.0.1:${registry.address().port}/`,
   ...(process.env.OMR_REA_COMMAND ? { OMR_REA_COMMAND: process.env.OMR_REA_COMMAND } : {}),
 };
 
@@ -174,5 +183,6 @@ try {
   }
 } finally {
   hanging.close();
+  registry.close();
   await rm(root, { recursive: true, force: true });
 }

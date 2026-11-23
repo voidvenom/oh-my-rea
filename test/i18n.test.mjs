@@ -210,7 +210,10 @@ test("/lang repaints the running startup activity and startup notices in both di
       const dump = join(root, `${from}.log`);
       const heading = (catalog) => catalog["changelog.whatsNew"].replace("{version}", VERSION);
       const footer = (catalog) => catalog["changelog.see"].split("`")[0].trimEnd();
-      const update = (catalog) => catalog["setup.updateAvailable"].replace("{packages}", `omr ${VERSION} → 99.0.0`);
+      // The TUI shows the boxed update notice; its title and body follow /lang live.
+      const update = (catalog) => `${catalog["update.title"]} `;
+      const updateBody = (catalog) => catalog["update.body"]
+        .replace("{name}", "omr").replace("{latest}", "99.0.0").replace("{installed}", VERSION);
       // In one direction also queue a command that has to wait for the same handshake.
       const commands = (from === "en" ? `/open ${rea}\r` : "") + `/lang ${to}\r`;
       const { stdout } = await run("python3", [
@@ -233,10 +236,10 @@ test("/lang repaints the running startup activity and startup notices in both di
       }
       const rendered = stripAnsi(lastFrame);
       const bitstream = (catalog, locale) => `${catalog["hud.bitstream"].toLocaleUpperCase(locale)} (${catalog["hud.binaryOn"]})`;
-      for (const text of [heading(after), footer(after), update(after), after["composer.busy"], after["hero.connecting"], bitstream(after, to)]) {
+      for (const text of [heading(after), footer(after), update(after), updateBody(after), after["composer.busy"], after["hero.connecting"], bitstream(after, to)]) {
         assert.ok(rendered.includes(text), `Missing ${text} in ${from} → ${to}\n${rendered}`);
       }
-      for (const text of [heading(before), footer(before), update(before), bitstream(before, from)]) {
+      for (const text of [heading(before), footer(before), update(before), updateBody(before), bitstream(before, from)]) {
         assert.ok(!rendered.includes(text), rendered);
       }
       assert.ok(frames.some((frame) => frame.includes("A language switch hint on the startup screen.")));
