@@ -18,6 +18,7 @@ import { readFileTail } from "../../journal.js";
 import type { ModelPort } from "../../model.js";
 import { estimateSessionCostUsd } from "../../modelConfig.js";
 import { parseSessionSnapshot } from "../../broker.js";
+import { ReaLauncherMissingError } from "../../rea.js";
 import {
   compactJson,
   ledgerHealthLabel,
@@ -160,10 +161,19 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
 
   registry.register("status", async (ctx) => {
     const { t } = ctx.output.i18n;
+    let reaError: string | null = null;
+    try {
+      await ctx.ensureConnected(false);
+      await ctx.ensureTargetOpen();
+    } catch (error) {
+      reaError = error instanceof Error ? error.message : String(error);
+      if (!(error instanceof ReaLauncherMissingError)) ctx.output.fail(t("runtime.reaFailed", { detail: reaError }));
+    }
     const [snapshot, investigation] = await Promise.all([
       ctx.reaCall("binary_session", { detail: "summary" }),
-      ctx.ensureConnected().then(()=>ctx.runtime.investigation.refresh({force:true})),
+      ctx.runtime.investigation.refresh({ force: true }),
     ]);
+    reaError ??= snapshot.problem;
     const journalState = await ctx.journalTailer.sync();
     const parsedSnap = parseSessionSnapshot(snapshot.payload);
     if (parsedSnap) await ctx.applyParsedSnapshot(parsedSnap);
@@ -175,6 +185,7 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
       row(t("status.session"), ctx.session.id),
       renderSession(snapshot.payload, ctx.output.i18n),
     ];
+    if (reaError) lines.push(row("REA", reaError));
     if (ctx.currentMagic) lines.push(row(t("hud.format"), ctx.currentMagic.label));
     if (ctx.activeProfile)
       lines.push(
@@ -200,6 +211,7 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
         session: ctx.session.id,
         profile: ctx.activeProfile?.id ?? null,
         snapshot: snapshot.payload,
+        ...(reaError ? { rea_error: reaError } : {}),
         evidence: {total_retained_records:ledger.evidence,source:ledger.health},
         unknowns: {total:ledger.unknownTotal,non_resolved:ledger.unknownOpen,resolved:ledger.unknownResolved},
         investigation,
@@ -424,7 +436,7 @@ export const registerSessionHandlers = (registry: CommandRegistry): void => {
 
   registry.register("journal", async (ctx) => {
     const journal = await readFileTail(ctx.session.journalPath, 32_768);
-    const lines = journal.trim().split("\n").filter(Boolean).slice(-30);
+    const lines = journal.trim().split(/\r?\n/).filter(Boolean).slice(-30);
     ctx.output.commandResult(
       "journal",
       { journal_path: ctx.session.journalPath, lines },

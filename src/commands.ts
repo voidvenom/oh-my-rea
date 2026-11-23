@@ -865,7 +865,7 @@ const LOCAL_COMMANDS: readonly Command[] = [
       "Target, providers, Evidence/Unknown counters, tokens & journal status",
     kind: "local",
     argument: "none",
-    requires: { rea: true, openTarget: true },
+    requires: {},
     source: "builtin",
   },
   {

@@ -68,7 +68,7 @@ describe("versioned semantic Forge tools", () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
-  it("rejects source tampering and dependency drift instead of reusing stale proofs", async () => {
+  it("rejects source tampering and dependency drift instead of reusing stale proofs", { skip: process.platform === "win32" && "dependency fixture uses a POSIX executable shebang" }, async () => {
     const root = await temp(); const previousPath = process.env.PATH;
     try {
       const bin = join(root, "bin"); await mkdir(bin); const dependency = join(bin, "fixture_dep");

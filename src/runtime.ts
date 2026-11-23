@@ -1,4 +1,3 @@
-import { createInterface } from "node:readline";
 import type { LaunchOptions } from "./args.js";
 import { inspectTargetMagic } from "./binaryArt.js";
 import { releaseEarlyInput } from "./earlyInput.js";
@@ -16,6 +15,7 @@ import { registerSessionHandlers } from "./runtime/handlers/sessionHandlers.js";
 import { registerSystemHandlers } from "./runtime/handlers/systemHandlers.js";
 import { registerWorkflowHandlers } from "./runtime/handlers/workflowHandlers.js";
 import { OutputSink } from "./runtime/output.js";
+import { runPlainRepl } from "./runtime/plainRepl.js";
 import { createSession } from "./session.js";
 import {
   detectTarget,
@@ -49,6 +49,7 @@ export const runOmr = async (
     !opts.command &&
     !opts.goal &&
     !deps &&
+    process.env["TERM"] !== "dumb" &&
     Boolean(process.stdin.isTTY && process.stdout.isTTY);
 
   if (!uiEnabled) releaseEarlyInput();
@@ -201,6 +202,10 @@ export const runOmr = async (
     output.ui?.stop();
     void (ctx?.shutdown("cancelled") ?? Promise.resolve()).finally(() => process.exit(143));
   };
+  const onSigbreak = (): void => {
+    output.ui?.stop();
+    void (ctx?.shutdown("cancelled") ?? Promise.resolve()).finally(() => process.exit(130));
+  };
   const onSighup = (): void => {
     output.ui?.stop();
     void (ctx?.shutdown("cancelled") ?? Promise.resolve()).finally(() => process.exit(129));
@@ -211,6 +216,7 @@ export const runOmr = async (
     process.on("uncaughtException", onUncaughtException);
     process.once("SIGTERM", onSigterm);
     process.once("SIGHUP", onSighup);
+    if (process.platform === "win32") process.once("SIGBREAK", onSigbreak);
   }
   const detachProcessListeners = (): void => {
     if (deps) return;
@@ -218,6 +224,7 @@ export const runOmr = async (
     process.off("uncaughtException", onUncaughtException);
     process.off("SIGTERM", onSigterm);
     process.off("SIGHUP", onSighup);
+    if (process.platform === "win32") process.off("SIGBREAK", onSigbreak);
   };
   const resumeLine = opts.resume ? `/resume ${opts.resume}` : null;
   if (!uiEnabled) await initialize();
@@ -368,27 +375,5 @@ export const runOmr = async (
     }
     return new Promise<number>(() => {});
   }
-  const repl = createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    terminal: true,
-    prompt: "omr › ",
-  });
-  if (resumeLine) submitQueued(resumeLine, () => repl.prompt());
-  else repl.prompt();
-  process.on("SIGINT", () => {
-    if (ctx.activeAbort) {
-      ctx.activeAbort.abort();
-      return;
-    }
-    repl.close();
-    void ctx.shutdown("cancelled").then(() => process.exit(130));
-  });
-  repl.on("line", (line) => {
-    submitQueued(line, () => repl.prompt());
-  });
-  repl.on("close", () => {
-    void ctx.shutdown("complete").then(() => process.exit(0));
-  });
-  return new Promise<number>(() => {});
+  return runPlainRepl(ctx!, resumeLine, submitQueued, detachProcessListeners);
 };

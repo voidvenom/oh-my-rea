@@ -62,9 +62,11 @@ const main = async (): Promise<number> => {
     return name === "setup" ? setup.runSetup(env, i18n) : setup.runUpdate(env, i18n);
   }
 
-  const wantsTui = !opts.plain && !opts.json && !opts.command && !opts.goal && Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  const wantsTui = !opts.plain && !opts.json && !opts.command && !opts.goal && process.env["TERM"] !== "dumb" && Boolean(process.stdin.isTTY && process.stdout.isTTY);
   const setup = await import("./setup.js");
-  const stop = await setup.ensureRea(process.env, async () => { await languageReady(); return i18n; });
+  // Status is a local diagnostic and must remain usable when the REA launcher is absent.
+  const stop = /^\/status\s*$/i.test(opts.command ?? "") ? null
+    : await setup.ensureRea(process.env, async () => { await languageReady(); return i18n; });
   if (stop !== null) return stop;
   if (!wantsTui && !opts.json && process.stdout.isTTY) {
     const notices = languageReady().then(() =>
@@ -75,7 +77,7 @@ const main = async (): Promise<number> => {
 
   // The interactive TUI will own the keyboard once it starts; capture keystrokes from now on so a command
   // typed while the runtime loads is replayed into it instead of arriving as a cooked `\n`.
-  if (wantsTui) beginEarlyInput();
+  if (wantsTui && !beginEarlyInput()) opts.plain = true;
   try {
     const { runOmr } = await import("./runtime.js");
     return await runOmr(opts, undefined, i18n);

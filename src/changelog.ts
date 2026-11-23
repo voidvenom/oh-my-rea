@@ -1,5 +1,5 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { reaConfigPath } from "./platform.js";
 import { join } from "node:path";
 import type { I18n, LocalizedMessage } from "./i18n/index.js";
 import { VERSION } from "./version.js";
@@ -42,7 +42,7 @@ export const whatsNewMessage = async (
     const section = await changelogText(version, file);
     const summary = section && releaseSummary(section);
     if (!summary) return null;
-    const dir = join(env["XDG_CONFIG_HOME"] ?? join(homedir(), ".config"), "rea", "omr-release-notes");
+    const dir = reaConfigPath(env, ["omr-release-notes"]);
     await mkdir(dir, { recursive: true, mode: 0o700 });
     await writeFile(join(dir, version), "", { flag: "wx", mode: 0o600 });
     return (t) => `${t("changelog.whatsNew", { version })}\n${summary}\n${t("changelog.see", { version })}`;

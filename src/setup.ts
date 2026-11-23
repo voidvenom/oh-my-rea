@@ -9,15 +9,16 @@
  */
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { readFileSync, statSync } from "node:fs";
-import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { promisify } from "node:util";
 import { padEndAnsi, visibleWidth } from "./ansi.js";
 import { resolveReaEnv } from "./env.js";
 import type { I18n, LocalizedMessage } from "./i18n/index.js";
-import { resolveReaLauncher } from "./reaLauncher.js";
+import { reaInvocation, resolveReaLauncher } from "./reaLauncher.js";
+import { npmInvocation, reaConfigPath } from "./platform.js";
+import { replaceFile } from "./platformFs.js";
 import { VERSION } from "./version.js";
 
 export { findOnPath } from "./reaLauncher.js";
@@ -62,7 +63,9 @@ export type ReaStatus =
 
 /** Blocking `rea --version`; ~1 s because REA itself is a large Node app. Never call it on the launch path. */
 const readReaVersion = (command: string, env: NodeJS.ProcessEnv): string | null | undefined => {
-  const run = spawnSync(command, ["--version"], { env, encoding: "utf8", timeout: 8_000, stdio: ["ignore", "pipe", "ignore"] });
+  const invocation = reaInvocation(command, ["--version"]);
+  if (!invocation) return undefined;
+  const run = spawnSync(invocation.command, invocation.args, { env, encoding: "utf8", timeout: 8_000, stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
   if (run.error || run.status !== 0) return undefined;
   const parsed = parseVersion(run.stdout);
   return parsed ? parsed.join(".") : null;
@@ -79,7 +82,9 @@ const readReaVersionAsync = (command: string, env: NodeJS.ProcessEnv): Promise<s
       clearTimeout(timer);
       resolve(value);
     };
-    const child = spawn(command, ["--version"], { env, stdio: ["ignore", "pipe", "ignore"] });
+    const invocation = reaInvocation(command, ["--version"]);
+    if (!invocation) { resolve(undefined); return; }
+    const child = spawn(invocation.command, invocation.args, { env, stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
       finish(undefined);
@@ -123,7 +128,7 @@ interface UpdateCache {
 }
 
 const cachePath = (env: NodeJS.ProcessEnv = process.env): string =>
-  join(env["XDG_CONFIG_HOME"] ?? join(homedir(), ".config"), "rea", "omr-update.json");
+  reaConfigPath(env, ["omr-update.json"]);
 
 const parseCache = (text: string): UpdateCache | null => {
   try {
@@ -147,7 +152,7 @@ const writeCache = async (env: NodeJS.ProcessEnv, cache: UpdateCache): Promise<v
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     const temp = `${path}.${process.pid}.${cacheWriteSequence++}.tmp`;
     await writeFile(temp, `${JSON.stringify(cache)}\n`, { mode: 0o600 });
-    await rename(temp, path);
+    await replaceFile(temp, path);
   } catch {
     // The cache is an optimization; a read-only config dir must never break startup.
   }
@@ -345,7 +350,9 @@ export const announceRelease = async (
 
 const npmInstallGlobal = (spec: string): Promise<number> =>
   new Promise((resolve) => {
-    const child = spawn("npm", ["install", "--global", spec], { stdio: "inherit" });
+    const invocation = npmInvocation(["install", "--global", spec]);
+    if (!invocation) { resolve(127); return; }
+    const child = spawn(invocation.command, invocation.args, { stdio: "inherit" });
     child.once("error", () => resolve(127));
     child.once("close", (code) => resolve(code ?? 1));
   });
@@ -459,7 +466,9 @@ export const runUpdate = async (env: NodeJS.ProcessEnv = process.env, language?:
 
 const printInstalledReleaseNotes = async (env: NodeJS.ProcessEnv, language: I18n): Promise<void> => {
   try {
-    const { stdout } = await promisify(execFile)("npm", ["root", "--global"], { encoding: "utf8" });
+    const invocation = npmInvocation(["root", "--global"]);
+    if (!invocation) return;
+    const { stdout } = await promisify(execFile)(invocation.command, invocation.args, { encoding: "utf8" });
     const root = join(stdout.trim(), OMR_PACKAGE);
     const { version } = JSON.parse(await readFile(join(root, "package.json"), "utf8")) as { version: string };
     const { whatsNew } = await import("./changelog.js");

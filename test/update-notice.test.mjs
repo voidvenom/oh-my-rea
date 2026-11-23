@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { test } from "node:test";
 import { whatsNew } from "../dist/changelog.js";
@@ -13,7 +13,7 @@ import { fixtureEnvironment } from "../scripts/fixture-environment.mjs";
 const ptyProbe = fileURLToPath(new URL("../bench/pty-probe.py", import.meta.url));
 
 test("every PTY launch checks a (mock) registry in the background and shows the update box in the same session", {
-  skip: process.platform === "win32",
+  skip: process.platform === "win32" && "Python pty.fork requires POSIX; native Windows uses ConPTY",
 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "omr-notice-"));
   // Mock npm registry: `npm_config_registry` points omr here instead of registry.npmjs.org.
@@ -65,7 +65,7 @@ test("every PTY launch checks a (mock) registry in the background and shows the 
         "--mark", "help=GUIDED WORKFLOWS", "--mark", "box=Update Available",
         "--mark", `v060=${body("0.6.0")}`, "--mark", `v061=${body("0.6.1")}`, "--mark", "run=Run: omr update",
         ...options,
-        "--", process.execPath, "--import", preload, join(dist, "main.js"), "--no-model",
+        "--", process.execPath, "--import", pathToFileURL(preload).href, join(dist, "main.js"), "--no-model",
       ], { cwd: root, env: { ...env, ...overrides }, timeout: 9000 });
       return JSON.parse(stdout);
     };

@@ -16,6 +16,9 @@ try {
 
   const env = {
     ...fixtureEnvironment(),
+    LANG: process.env.LANG ?? "C.UTF-8",
+    LC_ALL: process.env.LC_ALL ?? "",
+    LC_MESSAGES: process.env.LC_MESSAGES ?? "",
     HOME: root,
     USERPROFILE: root,
     XDG_CONFIG_HOME: join(root, "config"),
@@ -27,13 +30,13 @@ try {
     TMPDIR: root,
     TMP: root,
     TEMP: root,
-    DOCKER_HOST: `unix://${join(root, "docker.sock")}`,
+    DOCKER_HOST: process.platform === "win32" ? "npipe:////./pipe/omr-unit-no-docker" : `unix://${join(root, "docker.sock")}`,
     PATH: (process.platform === "win32"
       ? [dirname(process.execPath), join(process.env.SystemRoot ?? "C:\\Windows", "System32")]
       : [dirname(process.execPath), "/usr/bin", "/bin", "/usr/local/bin"]
     ).join(delimiter),
   };
-  const guard = fileURLToPath(new URL("fixtures/unit-network.mjs", testDir));
+  const guard = new URL("fixtures/unit-network.mjs", testDir).href;
   const child = spawn(process.execPath, ["--import", guard, "--test", ...tests], {
     cwd: fileURLToPath(new URL("../", testDir)), env, stdio: "inherit",
   });
@@ -42,5 +45,5 @@ try {
     child.once("exit", (code) => resolve(code ?? 1));
   });
 } finally {
-  await rm(root, { recursive: true, force: true });
+  await rm(root, { recursive: true, force: true, maxRetries: 3 });
 }

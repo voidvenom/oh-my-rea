@@ -1,7 +1,8 @@
 import { readdirSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, basename, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
+import { completionPath, localFilePath } from "./platform.js";
 
 export const TARGET_EXTENSIONS = [
   ".apk",
@@ -45,6 +46,9 @@ export const resolveTargetPath = (raw: string, cwd = process.cwd()): string => {
     text = text.slice(1, -1).trim();
   }
   if (!text) return "";
+  if (/^file:/i.test(text)) {
+    try { return localFilePath(text); } catch { return ""; }
+  }
   if (text === "~") return homedir();
   if (text.startsWith("~/") || text.startsWith("~\\")) {
     return join(homedir(), text.slice(2));
@@ -88,28 +92,7 @@ export const completePathInput = (
   partial: string,
   cwd = process.cwd(),
 ): string[] => {
-  const clean = partial.replace(/^["']/, "");
-  const expanded =
-    clean === "~"
-      ? `${homedir()}/`
-      : clean.startsWith("~/")
-        ? join(homedir(), clean.slice(2))
-        : clean;
-
-  const endsWithSlash =
-    expanded.endsWith("/") || expanded.endsWith("\\") || expanded.length === 0;
-  const searchDir = endsWithSlash
-    ? resolve(cwd, expanded || ".")
-    : resolve(cwd, dirname(expanded));
-  const prefix = endsWithSlash ? "" : basename(expanded).toLowerCase();
-  const displayDirPrefix =
-    clean.length === 0
-      ? ""
-      : endsWithSlash
-        ? clean
-        : clean.includes("/")
-          ? clean.slice(0, clean.lastIndexOf("/") + 1)
-          : "";
+  const { searchDir, prefix, displayDirPrefix } = completionPath(partial.replace(/^["']/, ""), cwd);
 
   let entries;
   try {

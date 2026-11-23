@@ -12,13 +12,16 @@ export interface OpenerCommand {
 }
 
 /**
- * Platform opener for an already validated URL. Windows uses `rundll32 url.dll,FileProtocolHandler`
- * rather than `cmd /c start`, because cmd re-parses `&`, `|` and `^` inside the URL.
+ * The one desktop opener for omr (links and any future "open in default app" action). The target is
+ * a single argv entry, never shell text: Linux `xdg-open`, macOS `/usr/bin/open` (absolute, so PATH
+ * cannot substitute it), Windows `rundll32 url.dll,FileProtocolHandler` (cmd's `start` would re-parse
+ * `&`, `|` and `^`). Targets that look like options or carry control characters are refused.
  */
-export const openerCommand = (url: string, platform: NodeJS.Platform = process.platform): OpenerCommand => {
-  if (platform === "darwin") return { command: "open", args: [url] };
-  if (platform === "win32") return { command: "rundll32.exe", args: ["url.dll,FileProtocolHandler", url] };
-  return { command: "xdg-open", args: [url] };
+export const openerCommand = (target: string, platform: NodeJS.Platform = process.platform): OpenerCommand | undefined => {
+  if (!target || target.startsWith("-") || /[\x00-\x1f\x7f]/.test(target)) return undefined;
+  if (platform === "darwin") return { command: "/usr/bin/open", args: [target] };
+  if (platform === "win32") return { command: "rundll32.exe", args: ["url.dll,FileProtocolHandler", target] };
+  return { command: "xdg-open", args: [target] };
 };
 
 export type OpenResult =
@@ -35,7 +38,9 @@ export interface OpenUrlOptions {
 export const openUrl = (raw: string, options: OpenUrlOptions = {}): Promise<OpenResult> => {
   const url = safeLinkUrl(raw);
   if (!url) return Promise.resolve({ ok: false, reason: "invalid" });
-  const { command, args } = openerCommand(url, options.platform);
+  const invocation = openerCommand(url, options.platform);
+  if (!invocation) return Promise.resolve({ ok: false, reason: "invalid" });
+  const { command, args } = invocation;
   const launch = options.spawnImpl ?? spawn;
   return new Promise((resolve) => {
     let child: ChildProcess;

@@ -12,9 +12,10 @@
  * Only public identifiers (provider id, base URL, model id) touch the cache; API keys
  * and prompts are never written or sent. models.dev is fetched without any identifying data.
  */
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { reaCachePath } from "./platform.js";
+import { replaceFileSync } from "./platformFs.js";
 import type { CapabilityMetadata } from "./capabilities.js";
 import { asRecord } from "./values.js";
 
@@ -39,8 +40,6 @@ const MODELS_DEV_PROVIDER: Readonly<Record<string, string>> = {
 
 /** `provider → model → [context, output | null]` */
 export type ModelsDevIndex = Readonly<Record<string, Readonly<Record<string, readonly [number, number | null]>>>>;
-
-const configDir = (env: NodeJS.ProcessEnv): string => join(env["XDG_CONFIG_HOME"] ?? join(homedir(), ".config"), "rea");
 
 const positiveInt = (value: unknown): number | null =>
   typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
@@ -84,7 +83,7 @@ const writeJson = (path: string, value: unknown): void => {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     const temp = `${path}.${process.pid}.tmp`;
     writeFileSync(temp, JSON.stringify(value), { mode: 0o600 });
-    renameSync(temp, path);
+    replaceFileSync(temp, path);
   } catch {
     // Caches are an optimization; a read-only config dir must never break a session.
   }
@@ -108,7 +107,7 @@ export interface ResolvedLimits {
 
 const loadIndex = async (sources: LimitSources): Promise<ModelsDevIndex | null> => {
   const now = (sources.now ?? Date.now)();
-  const path = join(configDir(sources.env), "omr-modelsdev.json");
+  const path = reaCachePath(sources.env, "omr-modelsdev.json");
   const cached = readJson<IndexFile>(path);
   if (cached?.version === 1 && now - cached.fetchedAt < INDEX_TTL_MS) return cached.index;
   try {
@@ -140,7 +139,7 @@ export const resolveLimits = async (
   sources: LimitSources,
 ): Promise<ResolvedLimits | null> => {
   const now = (sources.now ?? Date.now)();
-  const cachePath = join(configDir(sources.env), "omr-limits.json");
+  const cachePath = reaCachePath(sources.env, "omr-limits.json");
   const file = readJson<LiveFile>(cachePath);
   const key = limitsCacheKey(providerId, baseUrl, model);
   const cached = file?.version === 1 ? file.entries[key] : undefined;

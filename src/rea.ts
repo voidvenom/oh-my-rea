@@ -2,13 +2,19 @@ import type { Client } from "@modelcontextprotocol/client";
 import type { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { resolveReaLauncher } from "./reaLauncher.js";
+import { reaInvocation, resolveReaLauncher } from "./reaLauncher.js";
 import { asRecord } from "./values.js";
 import { VERSION } from "./version.js";
 import type { ChatImageBlock } from "./model.js";
 import { InvocationNotDispatchedError } from "./execution.js";
 import { resources } from "./resources.js";
 import { ownsProcessGroup, sessionLauncher, terminateOwnedProcess } from "./ownedProcess.js";
+
+export class ReaLauncherMissingError extends Error {
+  constructor() {
+    super("REA launcher not found. Install rea-agents and add its npm bin directory to PATH, or set OMR_REA_COMMAND to a REA executable or Node entry point.");
+  }
+}
 
 export interface ReaTool {
   name: string;
@@ -270,12 +276,13 @@ export class Rea implements ReaPort {
       import("@modelcontextprotocol/client/validators/ajv"),
       import("./lazyValidator.js"),
     ]);
-    const reaCommand = resolveReaLauncher(childEnv)?.path ?? "rea";
+    const resolved = resolveReaLauncher(childEnv);
+    if (!resolved) throw new ReaLauncherMissingError();
+    const invocation = reaInvocation(resolved.path, ["mcp"]);
+    if (!invocation) throw new Error(`Cannot start REA from ${resolved.path}. On Windows, use the npm-installed rea-agents shim, a native .exe, or set OMR_REA_COMMAND to scripts/rea.mjs.`);
     // stderr is piped (never inherited) so REA diagnostics cannot corrupt the TUI's
     // alternate screen; a bounded tail is retained to explain unexpected exits.
-    const isScript = reaCommand.endsWith(".mjs");
-    const command = isScript ? process.execPath : reaCommand;
-    const args = isScript ? [reaCommand, "mcp"] : ["mcp"];
+    const { command, args } = invocation;
     const launcher = sessionLauncher();
     const transport = new StdioClientTransport({ command: launcher ?? command, args: launcher ? ["--", command, ...args] : args, env: childEnv, stderr: "pipe" });
     let ownedPid: number | null = null, ownedGroup = false, releasing: Promise<void> | null = null;

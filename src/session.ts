@@ -4,19 +4,19 @@ import {
   mkdir,
   readdir,
   readFile,
-  rename,
   stat,
   unlink,
   writeFile,
 } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { ChatImageBlock, ChatMessage } from "./model.js";
 import { normalizeChatMessage, repairChatHistory } from "./history.js";
 import { LARGE_HISTORY_BYTES, readHistoryHeader, readHistoryTail, readLargeHistory } from "./historyFile.js";
 import { writeJsonAtomic } from "./durable.js";
+import { defaultSessionsPath, rebaseSessionArtifact } from "./platform.js";
+import { replaceFile } from "./platformFs.js";
 import { asArray, asRecord, asString } from "./values.js";
 import { VERSION } from "./version.js";
 
@@ -384,7 +384,7 @@ const slugOf = (target: string | null): string => {
 export const sessionsRootDir = (overrideRoot?: string): string =>
   overrideRoot?.trim() ||
   process.env["OMR_SESSIONS_DIR"]?.trim() ||
-  join(homedir(), ".rea", "sessions");
+  defaultSessionsPath(process.env);
 
 export interface CreateSessionOptions {
   readonly rootDir?: string | undefined;
@@ -587,7 +587,7 @@ export const saveSessionHistory = async (
   await writeFile(staging, `${JSON.stringify(payload, null, 2)}\n`, {
     mode: 0o600,
   });
-  await rename(staging, info.historyPath);
+  await replaceFile(staging, info.historyPath);
   await writeOmrMeta(info, target, model);
 };
 
@@ -636,7 +636,7 @@ export const forkSession = async (
   const browserState = join(forked.dir, "browser-state.json");
   if (existsSync(browserState)) {
     const rebase = (value: unknown, key = ""): unknown => {
-      if (typeof value === "string" && ["path", "screenshotPath"].includes(key) && value.startsWith(`${source.dir}/`)) return join(forked.dir, value.slice(source.dir.length + 1));
+      if (typeof value === "string" && (key === "path" || key === "screenshotPath")) return rebaseSessionArtifact(value, source.dir, forked.dir);
       if (Array.isArray(value)) return value.map(item => rebase(item));
       const record = asRecord(value); return record ? Object.fromEntries(Object.entries(record).map(([field, item]) => [field, rebase(item, field)])) : value;
     };
@@ -648,9 +648,8 @@ export const forkSession = async (
     if (!/^[a-f0-9-]{36}$/.test(id)) continue;
     const path = join(recipeDirectory, id, "run.json"); const raw = asRecord(JSON.parse(await readFile(path, "utf8")));
     if (!raw) throw new Error("Invalid copied recipe run");
-    const rebase = (value: unknown): unknown => typeof value === "string" && value.startsWith(`${source.dir}/`) ? join(forked.dir, value.slice(source.dir.length + 1)) : value;
-    if (Array.isArray(raw["artifacts"])) raw["artifacts"] = raw["artifacts"].map(value => { const item = asRecord(value); return item ? { ...item, path: rebase(item["path"]) } : value; });
-    if (Array.isArray(raw["steps"])) raw["steps"] = raw["steps"].map(value => { const item = asRecord(value); return item ? { ...item, resultPath: rebase(item["resultPath"]) } : value; });
+    if (Array.isArray(raw["artifacts"])) raw["artifacts"] = raw["artifacts"].map(value => { const item = asRecord(value); return item ? { ...item, path: rebaseSessionArtifact(item["path"], source.dir, forked.dir) } : value; });
+    if (Array.isArray(raw["steps"])) raw["steps"] = raw["steps"].map(value => { const item = asRecord(value); return item ? { ...item, resultPath: rebaseSessionArtifact(item["resultPath"], source.dir, forked.dir) } : value; });
     await writeJsonAtomic(path, raw);
   }
 

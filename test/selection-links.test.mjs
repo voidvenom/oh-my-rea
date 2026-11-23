@@ -222,7 +222,7 @@ test("only http, https and mailto URLs with a host are ever opened", () => {
     "https://", "https://user:pw@ex.io/", "https://ex.io/a b", "https://ex.io/\x07", "mailto:nobody", "-https://ex.io", "x".repeat(3000),
   ]) assert.equal(safeLinkUrl(bad), null, bad);
   assert.deepEqual(openerCommand("https://ex.io/", "linux"), { command: "xdg-open", args: ["https://ex.io/"] });
-  assert.deepEqual(openerCommand("https://ex.io/", "darwin"), { command: "open", args: ["https://ex.io/"] });
+  assert.deepEqual(openerCommand("https://ex.io/", "darwin"), { command: "/usr/bin/open", args: ["https://ex.io/"] });
   assert.deepEqual(openerCommand("https://ex.io/?a&b|c", "win32"), { command: "rundll32.exe", args: ["url.dll,FileProtocolHandler", "https://ex.io/?a&b|c"] });
 });
 

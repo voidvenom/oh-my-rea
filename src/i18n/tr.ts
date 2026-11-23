@@ -612,8 +612,7 @@ REA henüz kurulu değil. Resmî npm paketi "{package}"
   "setup.installed": "REA kuruldu.",
   "setup.missing": "REA kurulu değil. Terminalde `omr setup` veya `npm install --global {package}` komutunu çalıştırın.",
   "setup.node": "REA için gereken sürüm: {requirement}. Yüklü sürüm: {version}.",
-  "setup.permission": `npm EACCES hatası verdiyse kurulum için kullanıcı dizinini seçin:
-  npm config set prefix ~/.local   # ardından ~/.local/bin yolunu PATH'e ekleyin`,
+  "setup.permission": "`npm prefix --global` ile kurulum dizinini denetleyin ve yazabildiğiniz bir dizin seçin. Windows'ta bu dizini, macOS/Linux'ta bin alt dizinini PATH'e ekleyin.",
   "setup.registryError": "npm kayıt sunucusuna ulaşılamadı. Daha sonra tekrar deneyin.",
   "setup.skipped": "Kurulum atlandı. omr için REA gerekli. Hazır olduğunuzda `omr setup` komutunu çalıştırın.",
   "setup.sourceCheckout": "yerel depo",

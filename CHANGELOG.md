@@ -6,17 +6,22 @@ This project uses the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) f
 
 ### Added
 
-- Ctrl+click opens links in the TUI: URLs in answers, notices, drawers and the HUD (including URLs wrapped across lines), plus a plain click on the support link. Links are underlined in the link colour and still carry OSC 8 for terminals that open them natively. Only `http`, `https` and `mailto` URLs open, through `xdg-open`, `open` or `rundll32 url.dll,FileProtocolHandler`, launched directly without a shell. A short status toast confirms the launch.
+- Ctrl+click opens links in the TUI: URLs in answers, notices, drawers and the HUD (including URLs wrapped across lines), plus a plain click on the support link. Links are underlined in the link colour and still carry OSC 8 for terminals that open them natively. Only `http`, `https` and `mailto` URLs open, through `xdg-open`, `/usr/bin/open` or `rundll32 url.dll,FileProtocolHandler`, launched directly without a shell. A short status toast confirms the launch.
 - Double-click selects a word and triple-click selects a line in the TUI.
 - An amber **Update Available** box in the TUI (English and Turkish) shows the new version and the highlighted `omr update` command.
 
 ### Changed
 
 - Every interactive launch checks the registry in the background, after the first paint. The update box appears in the same session as soon as the registry answers, instead of on the next launch. A cached result shows at once and is updated in place. A minimum interval of 60 seconds between checks prevents bursts of launches from hammering the registry. The timeout is 3 seconds and failures are silent. `OMR_NO_UPDATE_CHECK=1` and CI still disable checks. The check honours `npm_config_registry`.
+- CI checks Linux, macOS and Windows across the supported Node lines, including installation and smoke tests from the npm tarball.
 
 ### Fixed
 
 - In-app mouse selection is now visible. The selected cells are drawn inverted while you drag, across wrapped and multi-line selections in the transcript, the startup splash, the HUD and the prompt. Display width is respected for wide characters, combining marks and Turkish letters. The highlight stays after the automatic copy and clears on Esc, Ctrl+C / Ctrl+Shift+C, a click elsewhere, or a resize.
+- Start npm-installed REA and run `omr setup` and `omr update` on Windows without passing arguments through batch shims. `omr /status` now works even when REA is missing.
+- Use native macOS and Windows config and session locations while retaining existing legacy files and explicit overrides. Retry Windows file replacement when another process briefly holds a file open.
+- Support Windows Python and PowerShell for `omr_run`, report available interpreters, and clean up running Windows child trees on cancellation where the host permits it.
+- Fix Windows drive, UNC and file URL handling, Unicode clipboard copy, and browser discovery on macOS and Windows.
 
 ## [0.7.0] - 2026-11-23
 

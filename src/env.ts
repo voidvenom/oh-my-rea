@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { hostHome, hostPath, normalizeEnv, reaConfigPath } from "./platform.js";
 
 const EXPORT_LINE = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
 
@@ -9,7 +10,7 @@ export interface ResolvedEnv {
   sources: string[];
 }
 
-const unquoteShellValue = (raw: string, home: string): string => {
+const unquoteShellValue = (raw: string, home: string, platform: NodeJS.Platform): string => {
   const trimmed = raw.trim();
   if (trimmed.length >= 2 && trimmed.startsWith("'")) {
     const end = trimmed.indexOf("'", 1);
@@ -19,7 +20,7 @@ const unquoteShellValue = (raw: string, home: string): string => {
     let out = "";
     for (let i = 1; i < trimmed.length; i += 1) {
       const ch = trimmed[i]!;
-      if (ch === "\\" && i + 1 < trimmed.length) {
+      if (ch === "\\" && i + 1 < trimmed.length && (platform !== "win32" || /["\\$`]/.test(trimmed[i + 1]!))) {
         out += trimmed[i + 1]!;
         i += 1;
         continue;
@@ -35,7 +36,7 @@ const unquoteShellValue = (raw: string, home: string): string => {
   ).trim();
   const expanded = bare.replace(/\$\{HOME\}|\$HOME\b/g, home);
   if (expanded === "~") return home;
-  if (expanded.startsWith("~/")) return join(home, expanded.slice(2));
+  if (expanded.startsWith("~/") || (platform === "win32" && expanded.startsWith("~\\"))) return hostPath(platform).join(home, expanded.slice(2));
   return expanded;
 };
 
@@ -43,13 +44,14 @@ export const parseExports = (
   text: string,
   into: NodeJS.ProcessEnv,
   home = homedir(),
+  platform = process.platform,
 ): void => {
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim();
     if (!line || line.startsWith("#")) continue;
     const match = EXPORT_LINE.exec(line);
     if (!match) continue;
-    into[match[1]!] = unquoteShellValue(match[2] ?? "", home);
+    into[match[1]!] = unquoteShellValue(match[2] ?? "", home, platform);
   }
 };
 
@@ -70,18 +72,20 @@ const readIfExists = (path: string): string | null => {
 export const resolveReaEnv = (
   base: NodeJS.ProcessEnv = process.env,
 ): ResolvedEnv => {
+  base = normalizeEnv(base);
   const env: NodeJS.ProcessEnv = {};
   const sources: string[] = [];
-  const home = base["HOME"] ?? homedir();
+  const home = hostHome(base);
   const candidates = [
     base["REA_ENV_FILE"],
-    join(base["XDG_CONFIG_HOME"] ?? join(home, ".config"), "rea", "rea-env.sh"),
+    reaConfigPath(base, ["rea-env.sh"], process.platform, home),
+    join(home, ".config", "rea", "rea-env.sh"),
     join(home, ".rea", "rea-env.sh"),
   ].filter(
     (value): value is string => typeof value === "string" && value.length > 0,
   );
 
-  for (const path of candidates) {
+  for (const path of new Set(candidates)) {
     const text = readIfExists(path);
     if (text === null) continue;
     parseExports(text, env, home);
@@ -89,8 +93,7 @@ export const resolveReaEnv = (
     break;
   }
 
-  for (const [key, value] of Object.entries(base)) {
-    if (value !== undefined) env[key] = value;
-  }
-  return { env, sources };
+  const merged = normalizeEnv(env);
+  for (const [key, value] of Object.entries(base)) if (value !== undefined) merged[key] = value;
+  return { env: merged, sources };
 };

@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { reaConfigPath } from "./platform.js";
 import { basename, extname, join } from "node:path";
 import { parseReasoningEffort, type ReasoningEffort } from "./modelConfig.js";
 
@@ -27,7 +27,7 @@ const VALID_COMMAND_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,47}$/;
 
 export const userCommandsDir = (env: NodeJS.ProcessEnv = process.env): string =>
   env["OMR_USER_COMMANDS_DIR"]?.trim() ||
-  join(homedir(), ".config", "rea", "omr", "commands");
+  reaConfigPath(env, ["omr", "commands"]);
 
 export const projectCommandsDir = (cwd: string): string =>
   join(cwd, ".omr", "commands");
