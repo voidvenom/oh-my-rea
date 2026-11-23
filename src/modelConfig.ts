@@ -189,6 +189,22 @@ const envFiniteNumber = (raw: string | undefined): number | null => {
   return Number.isFinite(n) ? n : null;
 };
 
+export const DEFAULT_SUBAGENT_CONCURRENCY = 4;
+
+export const resolveSubagentSettings = (
+  env: NodeJS.ProcessEnv = process.env,
+  stored = readStoredModelConfig(env),
+): { maxSteps: number; concurrency: number } => {
+  const integer = (value: unknown, min: number): number | undefined => {
+    const n = typeof value === "string" && value.trim() ? Number(value) : value;
+    return typeof n === "number" && Number.isSafeInteger(n) && n >= min ? n : undefined;
+  };
+  return {
+    maxSteps: integer(env["OMR_SUBAGENT_MAX_STEPS"], 0) ?? integer(stored?.["subagent_max_steps"], 0) ?? 0,
+    concurrency: integer(env["OMR_SUBAGENT_CONCURRENCY"], 1) ?? integer(stored?.["subagent_concurrency"], 1) ?? DEFAULT_SUBAGENT_CONCURRENCY,
+  };
+};
+
 /**
  * Parse a human-friendly token budget specification (`"500k"`, `"2m"`, `"250000"`, `500000`).
  * Returns `null` when unset, `"off"`, `"none"`, `"0"`, or invalid.

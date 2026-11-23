@@ -20,15 +20,12 @@ import {
   isAbsolute,
 } from "node:path";
 
-/**
- * `omr_run` per-call timeout. The default only bounds a script that did not ask for more; hitting it returns
- * an error result to the model (never ends the turn). The ceiling is opt-in via OMR_RUN_MAX_TIMEOUT_SEC.
- */
+/** Default wait window for omr_run, and the default hard deadline for direct script runner callers. */
 export const RUN_DEFAULT_TIMEOUT_SEC = 30;
 export const runMaxTimeoutSec = (env: NodeJS.ProcessEnv = process.env): number => {
   const parsed = Number(env["OMR_RUN_MAX_TIMEOUT_SEC"]);
-  // 2^31-1 ms is the largest delay a Node timer accepts; used as "no ceiling".
-  return Number.isFinite(parsed) && parsed >= 1 ? parsed : 2_147_483;
+  // 2^31-1 ms is the largest delay a Node timer accepts.
+  return Number.isFinite(parsed) && parsed >= 1 ? Math.min(parsed, 2_147_483) : Infinity;
 };
 const STREAM_HEAD_BYTES = 32_768;
 const STREAM_TAIL_BYTES = 16_384;
@@ -45,7 +42,9 @@ export interface RunRequest {
   readonly code?: string | undefined;
   readonly args?: readonly string[] | undefined;
   readonly stdin?: string | undefined;
-  readonly timeoutSec?: number | undefined;
+  /** A caller-owned hard deadline. Null uses only the operator's environment ceiling. */
+  readonly timeoutSec?: number | null | undefined;
+  readonly env?: NodeJS.ProcessEnv | undefined;
   /** Allow host networking. Default `false`: the script runs in an empty network namespace when available. */
   readonly network?: boolean | undefined;
   readonly signal?: AbortSignal | undefined;
@@ -69,6 +68,7 @@ export interface RunOutcome {
 }
 
 export type RunFailure = { readonly ok: false; readonly error: string };
+export type RunProgress = Pick<RunOutcome, "stdout" | "stderr" | "droppedBytes" | "durationMs">;
 
 interface Interpreter {
   readonly command: string;
@@ -328,7 +328,9 @@ const writeRunRecord = (
  */
 export const runSessionScript = async (
   request: RunRequest,
+  onStart?: (output: () => RunProgress) => void,
 ): Promise<RunOutcome | RunFailure> => {
+  request.signal?.throwIfAborted();
   if (request.code !== undefined) {
     const saved = saveSessionScript(
       request.scriptsDir,
@@ -343,8 +345,8 @@ export const runSessionScript = async (
   if ("error" in interpreter) return interpreter;
 
   const timeoutSec = Math.min(
-    Math.max(request.timeoutSec ?? RUN_DEFAULT_TIMEOUT_SEC, 1),
-    runMaxTimeoutSec(),
+    request.timeoutSec === null ? Infinity : Math.max(request.timeoutSec ?? RUN_DEFAULT_TIMEOUT_SEC, 1),
+    runMaxTimeoutSec(request.env),
   );
   const args = (request.args ?? []).map(String);
   const wantNetwork = request.network === true;
@@ -377,6 +379,10 @@ export const runSessionScript = async (
   const started = performance.now();
   const stdout = new BoundedCapture();
   const stderr = new BoundedCapture();
+  const output = (): RunProgress => ({
+    durationMs: Math.round(performance.now() - started),
+    stdout: stdout.text(), stderr: stderr.text(), droppedBytes: stdout.dropped + stderr.dropped,
+  });
   let timedOut = false;
   let aborted = false;
 
@@ -394,10 +400,10 @@ export const runSessionScript = async (
         child.kill("SIGKILL");
       }
     };
-    const timer = setTimeout(() => {
+    const timer = Number.isFinite(timeoutSec) ? setTimeout(() => {
       timedOut = true;
       killGroup();
-    }, timeoutSec * 1_000);
+    }, timeoutSec * 1_000) : undefined;
     const onAbort = (): void => {
       aborted = true;
       killGroup();
@@ -409,6 +415,7 @@ export const runSessionScript = async (
     child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
     child.stdin.on("error", () => {});
     child.stdin.end(request.stdin ?? "");
+    onStart?.(output);
 
     child.once("error", (error) => {
       clearTimeout(timer);
@@ -436,11 +443,8 @@ export const runSessionScript = async (
         signal,
         timedOut,
         aborted,
-        durationMs: Math.round(performance.now() - started),
         networkIsolation,
-        stdout: stdout.text(),
-        stderr: stderr.text(),
-        droppedBytes: stdout.dropped + stderr.dropped,
+        ...output(),
       };
       settle({
         ...base,

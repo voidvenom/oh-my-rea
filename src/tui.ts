@@ -534,6 +534,7 @@ export class TerminalUi {
   };
 
   private busy: string | LocalizedMessage | null = null;
+  private readonly subagentActivity = new Map<string, LocalizedMessage>();
   private busyStartedAt = 0;
   private networkGuard: InternalNetworkGuard | null = null;
   private binaryMode: BinaryFlowMode = "on";
@@ -946,6 +947,13 @@ export class TerminalUi {
 
   setStatus(patch: Partial<UiStatus>): void {
     this.status = { ...this.status, ...patch };
+    this.schedule();
+  }
+
+  setSubagentActivity(id: string, activity: LocalizedMessage | null): void {
+    if (activity) this.subagentActivity.set(id, activity);
+    else this.subagentActivity.delete(id);
+    this.syncFlowTimer();
     this.schedule();
   }
 
@@ -1471,7 +1479,7 @@ export class TerminalUi {
 
   private shouldAnimate(): boolean {
     if (!this.started) return false;
-    if (this.busy !== null) return true;
+    if (this.busy !== null || this.subagentActivity.size > 0) return true;
     if (this.networkGuard !== null && this.networkGuard.state !== "restored") {
       return true;
     }
@@ -4240,6 +4248,18 @@ export class TerminalUi {
 
     rows.push(`${t.border}${hline(width)}${t.reset}`);
 
+    if (this.subagentActivity.size) {
+      const heading = this.i18n.t("hud.subagents", { count: this.subagentActivity.size });
+      rows.push(`${t.neonCyan}${t.bold}${heading}${t.reset}`);
+      const capacity = Math.max(0, height - rows.length - 1);
+      const shown = Math.min(this.subagentActivity.size, capacity);
+      for (const [id, activity] of [...this.subagentActivity].slice(0, shown)) {
+        rows.push(truncateAnsi(`${t.neonCyan}${id}${t.reset} ${activity(this.i18n.t)}`, width));
+      }
+      if (shown < this.subagentActivity.size) rows.push(`+${this.subagentActivity.size - shown} · /subagents`);
+      rows.push(`${t.border}${hline(width)}${t.reset}`);
+    }
+
     // 2. Session & Target Telemetry
     rows.push(`${t.neonCyan}${t.bold}◈ ${this.i18n.upper(this.i18n.t("hud.telemetry"))}${t.reset}`);
     const kv = (k: string, v: string, color = t.fg): string =>
@@ -4742,6 +4762,24 @@ export class TerminalUi {
       rightRendered = `${t.muted}${this.i18n.t("status.models")}${thinkHint}${clipHint} · ${this.i18n.t("status.commands")}${this.output.text ? this.i18n.t("status.output") : ""}${t.reset}`;
     }
 
+    if (this.subagentActivity.size) {
+      const title = this.i18n.t("status.subagents", { count: this.subagentActivity.size });
+      const ids = [...this.subagentActivity.keys()].map((id) => /^sub-\d+/.exec(id)?.[0] ?? id);
+      const budget = Math.floor(width * 0.63);
+      const parts = [title];
+      for (const [index, id] of ids.entries()) {
+        const remaining = ids.length - index - 1;
+        if (visibleWidth(`${parts.join(" ")} ${id}${remaining ? ` +${remaining}` : ""}`) > budget) {
+          parts.push(`+${remaining + 1}`);
+          break;
+        }
+        parts.push(id);
+      }
+      const spin = SPINNER_FRAMES[this.tick % SPINNER_FRAMES.length];
+      const workers = `${t.neonCyan}${spin} ${parts.join(" ")}${t.reset}`;
+      const spare = Math.max(0, width - visibleWidth(workers) - 42);
+      rightRendered = spare >= 15 ? `${workers} · ${truncateAnsi(rightRendered, spare - 3)}` : workers;
+    }
     const rightW = visibleWidth(rightRendered);
     const leftBudget = Math.max(8, width - rightW - 2);
     const metrics = effortTag + tpsTag + ctxTag +

@@ -9,14 +9,16 @@ import {
 } from "./broker.js";
 import type { LocalizedMessage } from "./i18n/index.js";
 import type { ModelPort, ToolDefinition } from "./model.js";
+import { DEFAULT_SUBAGENT_CONCURRENCY } from "./modelConfig.js";
 import { findOmrWorkflow } from "./prompts.js";
 import { asArray, asRecord, asString } from "./values.js";
 import { abortable, ConcurrencyLimiter } from "./concurrency.js";
 import type { SessionBinding } from "./runtime/sessionRuntime.js";
 
-/** Subagent step cap is opt-in (`max_steps` >= 2); `0` means unlimited. */
+/** Subagent step cap is an operator setting; `0` means unlimited. */
 const stepCap = (maxSteps: number): string => (maxSteps > 0 ? String(maxSteps) : "∞");
-export const SUBAGENT_MAX_CONCURRENCY = 4;
+const DEFAULT_WAIT_MS = 120_000;
+const MAX_WAIT_MS = 300_000;
 
 const BLOCKED_SUBAGENT_TOOLS: ReadonlySet<string> = new Set([
   "open_binary",
@@ -345,7 +347,8 @@ const toTaskResult = (node: ManagedSubagentNode): SubagentTaskResult => ({
  * real-time step/tool/reasoning telemetry, and supervisor course-correction (`steer`) mid-flight or post-turn.
  */
 export class SubagentRunner {
-  private readonly limiter = new ConcurrencyLimiter(SUBAGENT_MAX_CONCURRENCY);
+  private readonly limiter: ConcurrencyLimiter;
+  private readonly waiters = new Set<() => void>();
   private readonly nodes = new Map<string, ManagedSubagentNode>();
   private readonly completedBgNotifications: string[] = [];
   private seq = 0;
@@ -357,6 +360,8 @@ export class SubagentRunner {
       readonly getTarget: () => string | null;
       readonly getTargetFormat: () => string | null;
       readonly getSessionDir: () => string;
+      readonly maxSteps?: number;
+      readonly concurrency?: number;
       readonly getBinding?: (() => SessionBinding) | undefined;
       readonly withTargetLease?: (<T>(binding: SessionBinding, work: () => Promise<T>, signal?: AbortSignal) => Promise<T>) | undefined;
       readonly historyCheckpoint?: ((scope: string, messages: readonly import("./model.js").ChatMessage[], reason: string) => Promise<void>) | undefined;
@@ -367,11 +372,14 @@ export class SubagentRunner {
       readonly turnContext?: (() => string | null) | undefined;
       readonly trace?: ((scope: string, type: string, data: Record<string, unknown>) => Promise<void>) | undefined;
       readonly onProgress?: ((message: string, localize: LocalizedMessage) => void) | undefined;
+      readonly onActivity?: (id: string, activity: LocalizedMessage | null) => void;
       readonly onEvidenceCollected?:
         | ((evidenceIds: readonly string[]) => void)
         | undefined;
     },
-  ) {}
+  ) {
+    this.limiter = new ConcurrencyLimiter(deps.concurrency ?? DEFAULT_SUBAGENT_CONCURRENCY);
+  }
 
   private allocateId(hint?: string): string {
     this.seq += 1;
@@ -521,7 +529,8 @@ export class SubagentRunner {
       request.role?.trim() ||
       (wf ? `${wf.id}-analyst` : "re-subagent");
     const id = this.allocateId(request.id ?? request.role ?? wf?.id);
-    const maxSteps = request.maxSteps !== undefined && request.maxSteps >= 2 ? Math.trunc(request.maxSteps) : 0;
+    const requested = request.maxSteps;
+    const maxSteps = requested !== undefined && Number.isSafeInteger(requested) && requested >= 0 ? requested : this.deps.maxSteps ?? 0;
     const dependsOn = (request.dependsOn ?? [])
       .map((d) => this.resolveNode(d)?.id ?? d.trim())
       .filter(Boolean);
@@ -623,6 +632,7 @@ export class SubagentRunner {
           node.currentActivity = msg;
           onProgress?.(`[${node.id}] ${msg}`);
           this.deps.onProgress?.(`[${node.id}] ${msg}`, (t) => `[${node.id}] ${localize(t)}`);
+          this.deps.onActivity?.(node.id, localize);
           this.persistSnapshot();
         };
 
@@ -872,6 +882,8 @@ export class SubagentRunner {
     } finally {
         if (node.abortController === abort) node.abortController = null;
         parentSignal?.removeEventListener("abort", onParentAbort);
+      this.deps.onActivity?.(node.id, null);
+      for (const notify of this.waiters) notify();
     }
   }
 
@@ -997,8 +1009,10 @@ export class SubagentRunner {
   /** Wait for one, several, or all active subagents to complete. */
   async waitFor(
     ids?: readonly string[],
-    timeoutMs = 120_000,
+    timeoutMs = DEFAULT_WAIT_MS,
+    signal?: AbortSignal,
   ): Promise<SubagentTaskResult[]> {
+    signal?.throwIfAborted();
     const targets: ManagedSubagentNode[] =
       ids && ids.length > 0
         ? ids
@@ -1013,34 +1027,25 @@ export class SubagentRunner {
           );
 
     if (targets.length === 0) {
-      return [...this.nodes.values()].map(toTaskResult);
+      return ids?.length ? [] : [...this.nodes.values()].map(toTaskResult);
     }
 
-    const waitAll = Promise.all(
-      targets.map(async (n) => {
-        if (n.activePromise) {
-          return n.activePromise.catch(() => toTaskResult(n));
-        }
-        return toTaskResult(n);
-      }),
-    );
-
-    if (timeoutMs > 0 && Number.isFinite(timeoutMs)) {
-      let timer: NodeJS.Timeout | null = null;
-      const timeoutPromise = new Promise<SubagentTaskResult[]>((resolve) => {
-        timer = setTimeout(
-          () => resolve(targets.map(toTaskResult)),
-          timeoutMs,
-        );
-        timer.unref?.();
-      });
-      try {
-        return await Promise.race([waitAll, timeoutPromise]);
-      } finally {
-        if (timer) clearTimeout(timer);
-      }
-    }
-    return waitAll;
+    // Each wait owns its own subscription. A timeout or signal detaches it without
+    // leaving handlers on a long-running child or aborting that child.
+    return new Promise((resolve, reject) => {
+      const cleanup = (): void => {
+        this.waiters.delete(notify);
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+      };
+      const finish = (): void => { cleanup(); resolve(targets.map(toTaskResult)); };
+      const notify = (): void => { if (targets.every((node) => !node.abortController)) finish(); };
+      const onAbort = (): void => { cleanup(); reject(signal?.reason); };
+      const timer = timeoutMs > 0 && Number.isFinite(timeoutMs) ? setTimeout(finish, timeoutMs) : undefined;
+      this.waiters.add(notify);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      notify();
+    });
   }
 
   /** Cancel a running subagent by ID or prefix. */
@@ -1164,21 +1169,24 @@ export class SubagentRunner {
       const timeoutSec = Number(args["timeout_s"]);
       const timeoutMs =
         Number.isFinite(timeoutSec) && timeoutSec > 0
-          ? Math.min(300_000, Math.trunc(timeoutSec * 1000))
-          : 120_000;
+          ? Math.max(1, Math.min(MAX_WAIT_MS, Math.trunc(timeoutSec * 1000)))
+          : DEFAULT_WAIT_MS;
       const results = await this.waitFor(
         ids.length > 0 ? ids : undefined,
         timeoutMs,
+        signal,
       );
       const allEv = new Set<string>();
       for (const r of results) {
         for (const ev of r.evidenceIds) allEv.add(ev);
       }
-      const blocks = results.map((r) => formatSubagentResult(r));
+      const pending = results.filter((r) => ["running", "steered", "queued", "waiting_deps"].includes(r.status));
+      const notice = pending.length ? `Wait window elapsed. ${pending.map((r) => r.id).join(", ")} are still active. You can keep calling wait or status.\n\n` : "";
+      const blocks = results.filter((r) => !pending.includes(r)).map(formatSubagentResult);
       return {
         text:
-          blocks.length > 0
-            ? `${renderSubagentGraph(this.graphSnapshot())}\n\n${blocks.join("\n\n---\n\n")}`
+          results.length > 0
+            ? `${notice}${[renderSubagentGraph(this.graphSnapshot()), ...blocks].join("\n\n---\n\n")}`
             : "No subagents to wait on.",
         isError: false,
         evidenceIds: [...allEv],
@@ -1231,11 +1239,6 @@ export class SubagentRunner {
     const dependsOn = asArray(args["depends_on"])
       .map((v) => asString(v).trim())
       .filter(Boolean);
-    const rawSteps = Number(args["max_steps"]);
-    const maxSteps =
-      Number.isFinite(rawSteps) && rawSteps >= 2
-        ? Math.trunc(rawSteps)
-        : undefined;
 
     const { node, promise } = this.spawnNode(
       {
@@ -1243,7 +1246,6 @@ export class SubagentRunner {
         ...(role ? { role } : {}),
         goal,
         ...(workflow ? { workflow } : {}),
-        ...(maxSteps ? { maxSteps } : {}),
         mode,
         ...(dependsOn.length > 0 ? { dependsOn } : {}),
       },

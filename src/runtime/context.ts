@@ -45,7 +45,7 @@ import type { Dashboard } from "../dashboard.js";
 import type { LocalizedMessage } from "../i18n/index.js";
 import { JournalTailer } from "../journal.js";
 import type { ChatImageBlock, ChatMessage, ModelPort } from "../model.js";
-import type { ModelConfig } from "../modelConfig.js";
+import { resolveSubagentSettings, type ModelConfig } from "../modelConfig.js";
 import { findProfile, type OmrProfile } from "../profiles.js";
 import {
   autonomousWorkflowNote,
@@ -188,10 +188,7 @@ export class OmrContext {
     this.sources = params.sources;
     this.sessionsRootDir = params.sessionsRootDir;
     this.output = params.output;
-    this.runtime = new SessionRuntime(params.session, this.env, (runtime) => this.createSubagentRunner(runtime), params.currentTarget, this.cwd);
-    this.configureInvestigation(this.runtime);
     this.onExecutionStore = params.deps?.onExecutionStore;
-    this.onExecutionStore?.(this.runtime.events);
     this.currentMagic = params.currentMagic;
     this.connectReaFn =
       params.deps?.connectRea ??
@@ -216,6 +213,9 @@ export class OmrContext {
       },
       params.deps?.createModelClient,
     );
+    this.runtime = new SessionRuntime(params.session, this.env, (runtime) => this.createSubagentRunner(runtime), params.currentTarget, this.cwd);
+    this.configureInvestigation(this.runtime);
+    this.onExecutionStore?.(this.runtime.events);
 
     this.compactionSettings = resolveCompactionSettings(
       this.env,
@@ -239,6 +239,7 @@ export class OmrContext {
   private createSubagentRunner(runtime: SessionRuntime): SubagentRunner {
     runtime.usage.setLimitProvider(() => this.modelController.modelInfo?.config.budgetTokens ?? null);
     return new SubagentRunner({
+      ...resolveSubagentSettings(this.env, this.modelController.storedModelConfig),
       getModel: (id) => {const client=this.modelController.buildActiveClient();return client ? runtime.model(client, `${runtime.id}:${id ?? "worker"}`) : null;},
       getBroker: async () => {
         if (this.runtime !== runtime) throw new Error("Worker belongs to a closed session runtime");
@@ -263,7 +264,7 @@ export class OmrContext {
       historyCheckpoint: (scope, messages, reason) => runtime.events.captureConversation(`${runtime.id}:${scope}`, messages, reason),
       archiveProjection: input => runtime.archive.project(input),
       trace: async (scope, type, data) => { await runtime.events.append(type, {scope: `${runtime.id}:${scope}`, ...data}); },
-      onProgress: (_msg, localize) => { if (this.runtime === runtime) this.output.ui?.setBusy(localize); },
+      onActivity: (id, activity) => { if (this.runtime === runtime) this.output.ui?.setSubagentActivity(id, activity); },
       onEvidenceCollected: (evidenceIds) => {
         if (this.runtime !== runtime) return;
         for (const id of evidenceIds) {
@@ -584,6 +585,7 @@ export class OmrContext {
     previous.lifecycle.abort();
     await this.readyPromise?.catch(() => {});
     await previous.workers.cancelAll();
+    await previous.scripts.close();
     await previous.captureEvidence().catch((error: unknown) => this.output.warnPersistenceOnce("evidence-export", error));
     await previous.events.flush();
     await previous.task.flush();
@@ -915,7 +917,9 @@ export class OmrContext {
         binding: () => runtime.binding,
         browser: this.browserManager,
         currentTarget: () => this.currentTarget,
-        scriptsDir: () => this.session.scriptsDir,
+        scriptsDir: () => runtime.session.scriptsDir,
+        scriptRuns: runtime.scripts,
+        scriptEnv: this.env,
         runSubagent: async (args, sig, onProg) => {
           const result = await this.subagentRunner.dispatchMetaTool(
             args,
@@ -1227,7 +1231,7 @@ export class OmrContext {
     const evidenceBefore = this.evidenceSeen.size;
     let streamedPlainLineOpen = false;
     let streamedAny = false;
-    let activeToolLabel = "";
+    const activeToolLabels = new Map<string, string>();
     let wasInterruptedForSteer = false;
     ui?.setBusy((t) => t("runtime.thinking"));
 
@@ -1363,9 +1367,9 @@ export class OmrContext {
             if (!ui && !this.opts.json) this.output.writeError(retry(this.output.i18n.t));
             if (this.opts.json) this.output.emit("model.retry", { ...notice });
           },
-          onToolProgress: (_callId, message) => {
-            const tool = activeToolLabel;
-            ui?.setBusy((t) => `${tool || t("runtime.tool")} · ${message.slice(0, 60)}`);
+          onToolProgress: (callId, message) => {
+            const tool = activeToolLabels.get(callId);
+            if (tool && tool !== "omr_task") ui?.setBusy(() => `${tool} · ${message.slice(0, 60)}`);
           },
           onToolStart: (callId, name, args) => {
             if (!ui && !this.opts.json && streamedPlainLineOpen) {
@@ -1373,7 +1377,7 @@ export class OmrContext {
               streamedPlainLineOpen = false;
             }
             const { displayTool, summary } = summarizeToolCall(name, args);
-            activeToolLabel = displayTool;
+            activeToolLabels.set(callId, displayTool);
             ui?.setBusy((t) => t("runtime.toolRunning", { tool: displayTool }));
             ui?.toolStart(callId, name, args);
             if (!this.opts.json && !ui) {
@@ -1390,6 +1394,7 @@ export class OmrContext {
             }
           },
           onToolEnd: (callId, outcome) => {
+            activeToolLabels.delete(callId);
             for (const id of outcome.evidenceIds) {
               this.evidenceSeen.add(id);
               this.lastEvidenceId = id;

@@ -10,10 +10,10 @@ import {
 } from "./browser.js";
 import {
   RUN_DEFAULT_TIMEOUT_SEC,
-  runMaxTimeoutSec,
   renderRunOutcome,
   runSessionScript,
 } from "./exec.js";
+import { SessionScriptRuns } from "./scriptRuns.js";
 import { readGuide, withOperatorPrecedence } from "./guide.js";
 import type { ChatImageBlock, ChatMessage, ToolDefinition } from "./model.js";
 import {
@@ -489,6 +489,7 @@ export const isReadOnlyToolCall = (
   readOnlyHint: (toolName: string) => boolean | null | undefined,
 ): boolean => {
   if (READ_ONLY_META_TOOLS.has(name)) return true;
+  if (name === "omr_run" && asString(args["run_id"]).trim()) return args["action"] !== "cancel";
   const effectiveName = name === "rea_call" ? asString(args["name"]) : name;
   if (!effectiveName || effectiveName === "rea_call") return false;
   return readOnlyHint(effectiveName) === true;
@@ -580,7 +581,7 @@ const META_TOOLS: readonly ToolDefinition[] = Object.freeze([
     function: {
       name: "omr_run",
       description:
-        "Run a script in the session scripts directory (.py python3, .sh bash, .mjs/.cjs node, .yar/.yara yara) and get its real stdout, stderr and exit code. Pass code to write the file and run it in one call, or omit code to run a saved script. Use it to test decryptors, parsers, solvers and rules against bytes read with read_bytes before reporting them as working. Runs with a scrubbed environment and, by default, no network. It never executes the target binary.",
+        "Run a verification script from the session scripts directory and read real stdout, stderr and exit status. Pass script and optional code to launch. If the wait window elapses, output so far and a run_id are returned while the script continues. Pass run_id to check it or wait again. Runs with a scrubbed environment and, by default, no network. It never executes the target binary.",
       parameters: {
         type: "object",
         properties: {
@@ -602,16 +603,24 @@ const META_TOOLS: readonly ToolDefinition[] = Object.freeze([
             type: "string",
             description: "Text piped to the script's stdin.",
           },
-          timeout_s: {
+          run_id: {
+            type: "string",
+            description: "Check an existing run instead of launching a script.",
+          },
+          action: {
+            type: "string",
+            enum: ["cancel"],
+            description: "Explicitly stop a run by run_id when its output is no longer needed.",
+          },
+          wait_s: {
             type: "number",
-            description: `Wall-clock limit in seconds (default ${RUN_DEFAULT_TIMEOUT_SEC}; pass more for long solvers/brute force, there is no ceiling). A timeout returns an error result, it does not end your turn.`,
+            description: `Seconds to wait for output (default ${RUN_DEFAULT_TIMEOUT_SEC}; 0 polls). Does not stop the script.`,
           },
           network: {
             type: "boolean",
             description: "Allow host networking (default false).",
           },
         },
-        required: ["script"],
       },
     },
   },
@@ -658,7 +667,7 @@ const META_TOOLS: readonly ToolDefinition[] = Object.freeze([
     function: {
       name: "omr_task",
       description:
-        "Orchestrate the OMR Subagent Mesh & DAG: spawn isolated read-only subagents (blocking `mode: 'wait'` or non-blocking `mode: 'background'` so you can continue your own REA work in parallel), inspect their live step-by-step trace (`action: 'inspect'`), course-correct a subagent that is making a mistake or needs to pivot (`action: 'steer'`), view the live DAG (`action: 'status'`), or collect background results (`action: 'wait'`).",
+        "For independent read-only analysis, fan out separate omr_task spawn calls with mode: 'background' in the same step, continue your own work, then collect them with action: 'wait' in a later step. The operator controls how many workers run at once. Use status/graph, inspect, or steer for live progress. A timed wait returns control to you while the workers continue.",
       parameters: {
         type: "object",
         properties: {
@@ -705,14 +714,9 @@ const META_TOOLS: readonly ToolDefinition[] = Object.freeze([
             description:
               "Upstream subagent IDs (e.g. ['sub-1']) that must finish before this subagent starts and whose findings feed into it.",
           },
-          max_steps: {
-            type: "integer",
-            minimum: 2,
-            description: "Optional cap on subagent steps (default: unlimited).",
-          },
           timeout_s: {
             type: "number",
-            description: "Timeout in seconds for 'action: wait' (default 120).",
+            description: "Wait window only (default 120 s, max 300 s). Workers keep running; repeat wait or status as needed.",
           },
         },
       },
@@ -836,6 +840,8 @@ export interface BrokerOptions {
   readonly currentTarget?: (() => string | null) | undefined;
   /** Session `scripts/` directory used by `omr_run`; `null` when no session is active. */
   readonly scriptsDir?: (() => string | null) | undefined;
+  readonly scriptRuns?: SessionScriptRuns;
+  readonly scriptEnv?: NodeJS.ProcessEnv;
   /** Optional isolated subagent orchestrator backing the `omr_task` meta-tool. */
   readonly runSubagent?:
     | ((
@@ -965,6 +971,7 @@ interface ResolvedCatalogTool {
 }
 
 export class ReaBroker {
+  private fallbackScriptRuns: SessionScriptRuns | undefined;
   private readonly compactedDefs = new Map<string, ToolDefinition>();
   private readonly listCache = new Map<string, ToolDefinition[]>();
   private catalogKey = "";
@@ -1188,8 +1195,8 @@ export class ReaBroker {
     try { this.assertCatalogVersion(expectedCatalogVersion); }
     catch (error) { return { tool: name, text: error instanceof Error ? error.message : String(error), isError: true, durationMs: 0, evidenceIds: [] }; }
     const local=this.checkedLocalTools().find(tool=>tool.definition.function.name===name);
-    if (this.options.execution && (local || ["omr_run", "omr_view_image", "omr_screenshot"].includes(name))) {
-      return this.options.execution.invoke({backend: local?.backend ?? (name === "omr_run" ? "script" : "artifact"), tool: name, args, readOnly: local ? local.readOnly(args) : name === "omr_view_image", binding: this.options.binding?.() ?? null}, () => this.dispatchUnrecorded(name, args, signal, onProgress, expectedCatalogVersion), signal);
+    if (this.options.execution && (local || name === "omr_view_image" || name === "omr_screenshot")) {
+      return this.options.execution.invoke({backend: local?.backend ?? "artifact", tool: name, args, readOnly: local ? local.readOnly(args) : name === "omr_view_image", binding: this.options.binding?.() ?? null}, () => this.dispatchUnrecorded(name, args, signal, onProgress, expectedCatalogVersion), signal);
     }
     return this.dispatchUnrecorded(name, args, signal, onProgress, expectedCatalogVersion);
   }
@@ -1293,29 +1300,37 @@ export class ReaBroker {
     const scriptsDir = this.options.scriptsDir?.() ?? null;
     if (!scriptsDir)
       return fail("omr_run needs an active session scripts directory.");
-    const rawArgs = asArray(args["args"]);
-    const timeout = asNumber(args["timeout_s"]);
-    const outcome = await runSessionScript({
-      scriptsDir,
-      script: asString(args["script"]),
-      code: typeof args["code"] === "string" ? args["code"] : undefined,
-      args: rawArgs.filter((a): a is string => typeof a === "string"),
-      stdin: typeof args["stdin"] === "string" ? args["stdin"] : undefined,
-      timeoutSec:
-        timeout === null
-          ? RUN_DEFAULT_TIMEOUT_SEC
-          : Math.min(timeout, runMaxTimeoutSec()),
-      network: args["network"] === true,
-      signal,
-    });
-    if ("error" in outcome) return fail(outcome.error);
-    return {
-      tool: "omr_run",
-      text: renderRunOutcome(outcome),
-      isError: !outcome.ok,
-      durationMs: outcome.durationMs,
-      evidenceIds: [],
-    };
+    const runs = this.options.scriptRuns ?? (this.fallbackScriptRuns ??= new SessionScriptRuns());
+    const waitSec = asNumber(args["wait_s"]) ?? asNumber(args["timeout_s"]) ?? RUN_DEFAULT_TIMEOUT_SEC;
+    const waitMs = Math.min(300, Math.max(0, waitSec)) * 1_000;
+    const existing = asString(args["run_id"]).trim();
+    if (args["action"] === "cancel") {
+      if (!existing) return fail("omr_run cancel requires run_id.");
+      runs.cancel(existing);
+    }
+    if (existing) return await runs.wait(existing, waitMs, signal) ?? fail(`No retained script run ${existing} in this session.`);
+    const script = asString(args["script"]).trim();
+    if (!script) return fail("omr_run requires script or run_id.");
+    const code = typeof args["code"] === "string" ? args["code"] : undefined;
+    const argv = asArray(args["args"]).filter((arg): arg is string => typeof arg === "string");
+    const stdin = typeof args["stdin"] === "string" ? args["stdin"] : undefined;
+    const network = args["network"] === true;
+    const id = runs.start(script, (owner, onStart) => {
+      const execute = async (): Promise<BrokerOutcome> => {
+        const outcome = await runSessionScript({
+          scriptsDir, script, code, args: argv, stdin, network,
+          timeoutSec: null, env: this.options.scriptEnv, signal: owner,
+        }, onStart);
+        if ("error" in outcome) return fail(outcome.error);
+        return { tool: "omr_run", text: truncateToolResult(renderRunOutcome(outcome)), isError: !outcome.ok,
+          durationMs: outcome.durationMs, evidenceIds: [] };
+      };
+      return this.options.execution?.invoke({
+        backend: "script", tool: "omr_run", args: { script, code, args: argv, stdin, network },
+        readOnly: false, binding: this.options.binding?.() ?? null,
+      }, execute, owner) ?? execute();
+    }, signal);
+    return (await runs.wait(id, waitMs, signal))!;
   }
 
   private async runOmrTaskTool(

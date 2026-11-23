@@ -21,6 +21,7 @@ import { ProgressTracker } from "../progress.js";
 import { CoverageService } from "../coverage.js";
 import { ContextArchive, contextArchiveTool } from "../contextArchive.js";
 import { InvestigationState, investigationTool } from "../investigation.js";
+import { SessionScriptRuns } from "../scriptRuns.js";
 
 export interface SessionBinding {
   readonly runtimeId: string;
@@ -55,6 +56,7 @@ export class SessionRuntime {
   readonly coverage: CoverageService;
   readonly browser: BrowserManager;
   readonly workers: SubagentRunner;
+  readonly scripts = new SessionScriptRuns();
   readonly journal: JournalTailer;
   readonly importedEvidenceIds = new Set<string>();
   rea: ReaPort | null = null;
@@ -229,7 +231,7 @@ export class SessionRuntime {
     this.closing = (async () => {
       this.lifecycle.abort();
       await this.workers.cancelAll();
-      const cleanup = await Promise.allSettled([this.browser.close(), this.rea?.close(), this.investigation.close()]);
+      const cleanup = await Promise.allSettled([this.scripts.close(), this.browser.close(), this.rea?.close(), this.investigation.close()]);
       await this.events.flush();
       this.rea = null; this.broker = null;
       const failures = cleanup.filter((result): result is PromiseRejectedResult => result.status === "rejected");

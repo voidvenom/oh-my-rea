@@ -3451,13 +3451,13 @@ describe("Multi-browser hub: Camoufox anti-detect MCP bridge, Chromium/Firefox/Z
 });
 
 describe("omr_run: verified script execution and CDP hardening", () => {
-  const withScripts = async (fn) => {
+  const withScripts = async (fn, scriptEnv = {}) => {
     const dir = await mkdtemp(join(tmpdir(), "omr-run-"));
     try {
       const mgr = new BrowserManager(dir, {});
       const broker = new ReaBroker(
         { find: () => undefined, tools: () => [] },
-        { browser: mgr, scriptsDir: () => dir },
+        { browser: mgr, scriptsDir: () => dir, scriptEnv },
       );
       await fn(broker, dir);
     } finally {
@@ -3546,15 +3546,17 @@ describe("omr_run: verified script execution and CDP hardening", () => {
     });
   });
 
-  it("kills runaway scripts at the timeout and bounds huge output", async () => {
+  it("kills runaway scripts at the operator deadline, returns partial output and bounds huge output", async () => {
     await withScripts(async (broker) => {
       const slow = await broker.dispatch("omr_run", {
         script: "slow.py",
-        code: "import time\ntime.sleep(30)\n",
-        timeout_s: 1,
+        code: "import sys, time\nprint('before deadline')\nprint('partial diagnostic', file=sys.stderr)\ntime.sleep(30)\n",
+        wait_s: 5,
       });
       assert.equal(slow.isError, true);
       assert.match(slow.text, /TIMED OUT/);
+      assert.match(slow.text, /before deadline/);
+      assert.match(slow.text, /partial diagnostic/);
 
       const big = await broker.dispatch("omr_run", {
         script: "big.py",
@@ -3563,7 +3565,7 @@ describe("omr_run: verified script execution and CDP hardening", () => {
       assert.equal(big.isError, false);
       assert.match(big.text, /omr dropped \d+ bytes/);
       assert.ok(big.text.length < 70_000);
-    });
+    }, { OMR_RUN_MAX_TIMEOUT_SEC: "1" });
   });
 
   it("points .js files at Frida instead of running them under Node, and requires a session", async () => {

@@ -5,6 +5,7 @@ import type { RecipeEngine } from "./recipes.js";
 import { selectJsonPointer } from "./jsonPointer.js";
 import type { CoverageService } from "./coverage.js";
 import type { TaskStateStore } from "./taskState.js";
+import { asRecord } from "./values.js";
 
 export interface LocalTool {
   readonly definition: ToolDefinition;
@@ -110,7 +111,7 @@ export const forgeManagementTool = (registry: ForgeRegistry): LocalTool => ({
               dependencies: { type: "array", items: { type: "object", properties: { command: { type: "string" }, versionArgs: { type: "array", minItems: 1, maxItems: 1, items: { type: "string", enum: ["--version", "-version", "-V", "-v", "version"] } }, versionContains: { type: "string" } }, required: ["command"] } },
               inputSchema: { type: "object", description: "Supported JSON schema dialect; root type object required" }, outputSchema: { type: "object" },
               fixtures: { type: "array", minItems: 1, items: { type: "object", properties: { id: { type: "string" }, input: { type: "object" }, expected: { description: "Exact expected JSON value" } }, required: ["id", "input", "expected"] } },
-              timeoutSec: { type: "integer", minimum: 1, maximum: 300 }, network: { type: "boolean" },
+              network: { type: "boolean" },
             },
             required: ["id", "version", "description", "interpreter", "inputSchema", "outputSchema", "fixtures"], additionalProperties: false,
           },
@@ -128,7 +129,13 @@ export const forgeManagementTool = (registry: ForgeRegistry): LocalTool => ({
     let result: unknown; let isError = false;
     switch (args["action"]) {
       case "list": result = await registry.list(id || undefined); break;
-      case "register": if (typeof args["code"] !== "string") throw new Error("Forge register requires code"); result = await registry.register(args["spec"], args["code"]); break;
+      case "register": {
+        if (typeof args["code"] !== "string") throw new Error("Forge register requires code");
+        const spec = Array.isArray(args["spec"]) ? null : asRecord(args["spec"]);
+        const { timeoutSec: _operatorTimeout, ...modelSpec } = spec ?? {};
+        result = await registry.register(spec ? modelSpec : args["spec"], args["code"]);
+        break;
+      }
       case "verify": { const proof = await registry.verify(id, version, signal); result = proof; isError = !proof.passed; break; }
       case "activate": await registry.activate(id, version, signal); result = { id, version, active: true }; break;
       case "deactivate": await registry.deactivate(id); result = { id, active: false }; break;
@@ -145,7 +152,7 @@ export const recipeTool = (engine: RecipeEngine): LocalTool => ({
     description: "List, inspect or execute deterministic versioned analysis recipes. javascript retains static JS Evidence; browser-javascript links passive CDP DOM/network, screenshot, captured-script export and static analysis in one persisted episode. Runs record entry/exit conditions and real coverage/Unknowns. Completed means pipeline criteria, not full application understanding. Native Evidence is checked against the active ledger; a missing capability or failed condition is explicit. A replay is a fresh run, not an automatic retry of uncertain effects.",
     parameters: { type: "object", properties: {
       action: { type: "string", enum: ["list", "run", "inspect"] }, recipe: { type: "string", enum: ["javascript", "browser-javascript"] }, run_id: { type: "string" },
-      input: { type: "object", properties: { input_path: { type: "string" }, cdp_endpoint: { type: "string", description: "Defaults to the currently owned local browser only" }, target_id: { type: "string" }, observation_ms: { type: "integer", minimum: 0, maximum: 30000 }, min_network_requests: { type: "integer", minimum: 0 }, analysis_timeout_ms: { type: "integer", minimum: 1, maximum: 300000 }, max_heap_mb: { type: "integer", minimum: 128, maximum: 2048 } }, additionalProperties: false },
+      input: { type: "object", properties: { input_path: { type: "string" }, cdp_endpoint: { type: "string", description: "Defaults to the currently owned local browser only" }, target_id: { type: "string" }, observation_ms: { type: "integer", minimum: 0, maximum: 30000 }, min_network_requests: { type: "integer", minimum: 0 } }, additionalProperties: false },
     }, required: ["action"], additionalProperties: false },
   } },
   backend: "recipe",
@@ -154,7 +161,14 @@ export const recipeTool = (engine: RecipeEngine): LocalTool => ({
     signal?.throwIfAborted(); let result: unknown; let isError = false;
     if (args["action"] === "list") result = { recipes: engine.list(), recentRuns: await engine.recent() };
     else if (args["action"] === "inspect" && typeof args["run_id"] === "string") result = await engine.inspect(args["run_id"]);
-    else if (args["action"] === "run" && typeof args["recipe"] === "string") { const run = await engine.run(args["recipe"], args["input"] ?? {}, signal); result = run; isError = run.status !== "completed"; }
+    else if (args["action"] === "run" && typeof args["recipe"] === "string") {
+      const input = args["input"] ?? {};
+      const fields = Array.isArray(input) ? null : asRecord(input);
+      const { analysis_timeout_ms: _operatorTimeout, max_heap_mb: _operatorHeap, ...modelInput } = fields ?? {};
+      const run = await engine.run(args["recipe"], fields ? modelInput : input, signal);
+      result = run;
+      isError = run.status !== "completed";
+    }
     else throw new Error("omr_recipe requires list, inspect with run_id, or run with recipe and input");
     return { tool: "omr_recipe", text: JSON.stringify(result), structuredContent: result, isError, durationMs: 0, evidenceIds: [] };
   },

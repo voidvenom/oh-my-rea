@@ -13,12 +13,19 @@ This project uses the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) f
 - `omr changelog [version|--all]` and a paged `/changelog` view read the packaged release history.
 - Interactive launches show a short release summary once per installed version. `omr update` shows it immediately when the newly installed package includes notes.
 - Turkish and English terminal interfaces. Select a language with `--lang`, `OMR_LANG`, or `/lang`.
+- Operator settings `OMR_SUBAGENT_MAX_STEPS` / `subagent_max_steps` and `OMR_SUBAGENT_CONCURRENCY` / `subagent_concurrency` control subagent turns and worker slots. The default is unlimited steps and four slots.
 
 ### Changed
 
 - `/lang en` and `/lang tr` switch immediately and save the selection. Startup overrides through `--lang` and `OMR_LANG` apply to the current launch.
 - Update notices show installed and available versions. They point to `/changelog` and `omr update`. The first launch with an empty cache primes it in the background, and the next launch can show the result.
 - npm packages include this changelog. The maintainer script requires a section for the version being released, and the GitHub Release uses that section as its notes.
+- `omr_run` wait windows return partial output and a `run_id` while the script continues. The operator's `OMR_RUN_MAX_TIMEOUT_SEC` still stops an overlong script and returns its captured output.
+- The status line and HUD track concurrent subagents. `omr_task` encourages background fan-out and later collection. Expiring wait windows return control to the parent while workers continue.
+
+### Removed
+
+- Model-selected `omr_task.max_steps`, Forge manifest timeouts, and recipe analysis time and heap overrides. Operators control these limits.
 
 ### Fixed
 

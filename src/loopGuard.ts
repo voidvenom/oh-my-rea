@@ -57,6 +57,8 @@ export class LoopGuard {
     args: Record<string, unknown>,
     readOnly: boolean,
   ): string | null {
+    if (name === "omr_run" && typeof args["run_id"] === "string" && args["action"] !== "cancel") return null;
+    if (name === "omr_task" && ["wait", "status", "graph", "inspect"].includes(String(args["action"]))) return null;
     const entry = this.seen.get(LoopGuard.key(name, args));
     if (!entry) return null;
     const limit = LIVE_STATE_TOOL.test(effectiveTool(name, args)) ? LIVE_LOOP_LIMIT : LOOP_LIMIT;
