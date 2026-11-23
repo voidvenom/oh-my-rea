@@ -55,7 +55,6 @@ import {
   OPERATOR_PRECEDENCE_NOTE,
   listGuideTopics,
   readGuide,
-  skillDirectory,
 } from "../dist/guide.js";
 import {
   COMPACTION_MODES,
@@ -1398,16 +1397,19 @@ describe("Backend resilience, caching, and catalog ranking", () => {
       // never ends, never sends again
     });
     try {
-      const client = new ModelClient(baseConfig(s.port, { timeoutMs: 1000 }));
+      // This test checks the error from one stalled attempt. Retry/recovery has its own SSE fixtures.
+      const client = new ModelClient(baseConfig(s.port, { timeoutMs: 1000, maxRetries: 0 }));
+      let streamed = "";
       await assert.rejects(
         client.stream(
           [{ role: "user", content: "hi" }],
           [],
           undefined,
-          () => {},
+          (text) => { streamed += text; },
         ),
         /stalled/,
       );
+      assert.equal(streamed, "a");
     } finally {
       s.server.closeAllConnections();
       await s.close();
@@ -1674,22 +1676,18 @@ describe("Backend resilience, caching, and catalog ranking", () => {
   });
 
   it("serves REA skill guides on demand with an index and clipped bodies", async () => {
-    const dir = skillDirectory() ? null : await mkdtemp(join(tmpdir(), "omr-skill-"));
+    const dir = await mkdtemp(join(tmpdir(), "omr-skill-"));
     try {
-      let env = process.env;
-      if (dir) {
-        const { mkdir } = await import("node:fs/promises");
-        await mkdir(join(dir, "references"), { recursive: true });
-        await writeFile(
-          join(dir, "SKILL.md"),
-          "## Overview\nIntro\n## Routing\nRoutes\n## Evidence\nIds\n## Native\nELF\n## Android\nAPK\n",
-        );
-        await writeFile(
-          join(dir, "references", "runtime-observation.md"),
-          "# Runtime observation\n\n" + "Observe dynamic calls and runtime traces safely. ".repeat(10),
-        );
-        env = { ...process.env, OMR_REA_SKILL_DIR: dir };
-      }
+      await mkdir(join(dir, "references"), { recursive: true });
+      await writeFile(
+        join(dir, "SKILL.md"),
+        "## Overview\nIntro\n## Routing\nRoutes\n## Evidence\nIds\n## Native\nELF\n## Android\nAPK\n",
+      );
+      await writeFile(
+        join(dir, "references", "runtime-observation.md"),
+        "# Runtime observation\n\n" + "Observe dynamic calls and runtime traces safely. ".repeat(1_000),
+      );
+      const env = { OMR_REA_SKILL_DIR: dir };
       const topics = listGuideTopics(env);
       assert.ok(
         topics.length > 5,
@@ -1704,7 +1702,7 @@ describe("Backend resilience, caching, and catalog ranking", () => {
       assert.ok(ref.text.length > 200 && ref.text.length <= 24_500);
       assert.equal(readGuide("no-such-topic-xyz", env).ok, false);
     } finally {
-      if (dir) await rm(dir, { recursive: true, force: true });
+      await rm(dir, { recursive: true, force: true });
     }
   });
 });
@@ -2853,19 +2851,15 @@ describe("Session persistence, resume repair & sticky tool restore", () => {
 
 describe("Operator authority: no restricting prompts reach the model", () => {
   it("prefixes every served REA playbook (rea_guide and rea_prompt) with the operator precedence note", async () => {
-    const dir = skillDirectory() ? null : await mkdtemp(join(tmpdir(), "omr-skill-"));
+    const dir = await mkdtemp(join(tmpdir(), "omr-skill-"));
     try {
-      let env = process.env;
-      if (dir) {
-        const { mkdir } = await import("node:fs/promises");
-        await mkdir(join(dir, "references"), { recursive: true });
-        await writeFile(join(dir, "SKILL.md"), "## Overview\nIntro\n");
-        await writeFile(
-          join(dir, "references", "runtime-observation.md"),
-          "# Runtime observation\n\nObserve runtime calls.\n",
-        );
-        env = { ...process.env, OMR_REA_SKILL_DIR: dir };
-      }
+      await mkdir(join(dir, "references"), { recursive: true });
+      await writeFile(join(dir, "SKILL.md"), "## Overview\nIntro\n");
+      await writeFile(
+        join(dir, "references", "runtime-observation.md"),
+        "# Runtime observation\n\nObserve runtime calls.\n",
+      );
+      const env = { OMR_REA_SKILL_DIR: dir };
       const guide = readGuide("ref:runtime-observation", env);
       assert.equal(guide.ok, true);
       assert.ok(guide.text.startsWith(OPERATOR_PRECEDENCE_NOTE));
@@ -2880,7 +2874,7 @@ describe("Operator authority: no restricting prompts reach the model", () => {
         "the plain topic index is not a playbook",
       );
     } finally {
-      if (dir) await rm(dir, { recursive: true, force: true });
+      await rm(dir, { recursive: true, force: true });
     }
 
     const rea = {
@@ -3267,6 +3261,7 @@ describe("Multi-browser hub: Camoufox anti-detect MCP bridge, Chromium/Firefox/Z
         CAMOFOX_BASE_URL: `http://127.0.0.1:${port}`,
         CAMOFOX_USER_ID: "test-user",
         CAMOFOX_SESSION_KEY: "sec-1",
+        OMR_TOR_PROXY: `socks5h://127.0.0.1:${port}`,
       });
       const rea = { find: () => undefined, tools: () => [], sessionDir: dir };
       const broker = new ReaBroker(rea, { browser: mgr });
@@ -4020,13 +4015,11 @@ describe("Network Guard (◈ net guard): outage hold, live ping probe, and mid-s
       assert.equal(liveProbe.ok, true);
       assert.equal(typeof liveProbe.latencyMs, "number");
     } finally {
-      srv.close();
+      srv.closeAllConnections();
+      await new Promise((resolve) => srv.close(resolve));
     }
 
-    const deadProbe = await probeEndpointConnectivity(
-      "http://127.0.0.1:1/v1",
-      400,
-    );
+    const deadProbe = await probeEndpointConnectivity(baseUrl, 400);
     assert.equal(deadProbe.ok, false);
     assert.equal(formatPingTarget("https://api.openai.com/v1"), "api.openai.com:443");
     assert.equal(

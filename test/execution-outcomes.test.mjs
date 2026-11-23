@@ -7,6 +7,9 @@ import { Agent } from "../dist/agent.js";
 import { parseArgs } from "../dist/args.js";
 import { runOmr } from "../dist/runtime.js";
 import { FakeModel, FakeRea } from "../dist/testing/fakes.js";
+import { useModelCatalogFixtures } from "./fixtures/model-catalogs.mjs";
+
+useModelCatalogFixtures();
 
 const result = (finishReason, toolCalls = []) => ({ content: "partial evidence", toolCalls, reasoning: null, finishReason, usage: null });
 const modelWith = (step) => ({ model: "fixture", stream: async () => step, summarize: async () => "summary" });

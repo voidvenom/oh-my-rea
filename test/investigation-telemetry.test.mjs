@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { useModelCatalogFixtures } from "./fixtures/model-catalogs.mjs";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -18,6 +19,8 @@ import { TerminalUi } from "../dist/tui.js";
 import { stripAnsi } from "../dist/ansi.js";
 import { createReadOnlySubagentBroker } from "../dist/subagent.js";
 import { InvestigationState } from "../dist/investigation.js";
+
+useModelCatalogFixtures();
 
 const hash=value=>createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const evidence=(operation,normalized_result,unknowns=[])=>({evidence_id:`ev_${hash([operation,normalized_result,unknowns])}`,operation,provider:{id:"controlled-native"},normalized_result,unknowns});

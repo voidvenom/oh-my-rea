@@ -363,8 +363,8 @@ export const runOmr = async (
       ui.setBusy(null);
       output.fail(error instanceof Error ? error.message : String(error));
     });
-    void import("./setup.js").then(({ updateNotice }) => {
-      const notice = updateNotice();
+    void initialization.then(() => import("./setup.js")).then(({ updateNotice }) => {
+      const notice = updateNotice(ctx.env);
       if (notice) ui.addSystem(notice);
     }).catch(() => {});
     if (!resumeLine) {

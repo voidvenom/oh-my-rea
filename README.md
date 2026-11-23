@@ -123,6 +123,8 @@ npm test
 node bin/omr.js --help
 ```
 
+`npm test` runs the unit and integration fixtures with a temporary home and a controlled environment. Live provider and tool checks are separate scripts under `test/live-*.mjs`.
+
 When omr runs next to a REA checkout, it uses that checkout. Override with `OMR_REA_COMMAND`.
 
 ## Responsible use

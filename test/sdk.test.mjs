@@ -5,12 +5,15 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 import { createRuntime } from "oh-my-rea/sdk";
 import { FakeModel, FakeRea } from "../dist/testing/fakes.js";
 const env=root=>({PATH:process.env.PATH,XDG_CONFIG_HOME:root,OMR_MODEL:"gpt-4.1",OPENAI_API_KEY:"fixture"});
 describe("public SDK consumer contract",()=>{
   it("resolves the installed-style SDK subpath and TypeScript declarations",()=>{
-    const check=spawnSync(process.execPath,["node_modules/typescript/bin/tsc","--noEmit","--module","NodeNext","--moduleResolution","NodeNext","--target","ES2024","--strict","--skipLibCheck","test/fixtures/sdk-consumer.mts"],{encoding:"utf8"});assert.equal(check.status,0,check.stdout+check.stderr);
+    const compiler = fileURLToPath(new URL("../node_modules/typescript/bin/tsc", import.meta.url));
+    const consumer = fileURLToPath(new URL("fixtures/sdk-consumer.mts", import.meta.url));
+    const check=spawnSync(process.execPath,[compiler,"--noEmit","--module","NodeNext","--moduleResolution","NodeNext","--target","ES2024","--strict","--skipLibCheck",consumer],{encoding:"utf8"});assert.equal(check.status,0,check.stdout+check.stderr);
   });
   it("runs offline typed commands, serializes updates, and reads durable event cursors without starting backends",async()=>{
     const root=await mkdtemp(join(tmpdir(),"omr-sdk-offline-"));let runtime,connections=0;const live=[];

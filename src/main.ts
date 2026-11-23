@@ -2,6 +2,7 @@
 import { existsSync } from "node:fs";
 import { parseArgs, type LaunchOptions } from "./args.js";
 import { beginEarlyInput, releaseEarlyInput } from "./earlyInput.js";
+import { resolveReaEnv } from "./env.js";
 import { VERSION } from "./version.js";
 
 const main = async (): Promise<number> => {
@@ -9,7 +10,8 @@ const main = async (): Promise<number> => {
   const sub = process.argv[2];
   if ((sub === "setup" || sub === "update") && process.argv.length === 3 && !existsSync(sub)) {
     const setup = await import("./setup.js");
-    return sub === "setup" ? setup.runSetup() : setup.runUpdate();
+    const { env } = resolveReaEnv();
+    return sub === "setup" ? setup.runSetup(env) : setup.runUpdate(env);
   }
 
   let opts: LaunchOptions;
@@ -60,7 +62,7 @@ const main = async (): Promise<number> => {
   const stop = await setup.ensureRea();
   if (stop !== null) return stop;
   if (!wantsTui && !opts.json && process.stdout.isTTY) {
-    const notice = setup.updateNotice();
+    const notice = setup.updateNotice(resolveReaEnv().env);
     if (notice) process.stderr.write(`\x1b[2m${notice}\x1b[0m\n`);
   }
 

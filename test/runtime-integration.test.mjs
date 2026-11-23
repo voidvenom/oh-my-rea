@@ -35,6 +35,9 @@ import {
   renderSubagentInspector,
 } from "../dist/subagent.js";
 import { FakeModel, FakeRea } from "../dist/testing/fakes.js";
+import { useModelCatalogFixtures } from "./fixtures/model-catalogs.mjs";
+
+useModelCatalogFixtures();
 
 const makeTestEnv = () => ({
   OPENAI_API_KEY: "sk-test-fake-key",

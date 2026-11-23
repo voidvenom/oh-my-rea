@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 import { writeSessionStore } from "../bench/startup-fixture.mjs";
 import { normalizeTypedAhead } from "../dist/earlyInput.js";
 import { createLazyValidatorProvider } from "../dist/lazyValidator.js";
 import { loadSavedSession } from "../dist/session.js";
-import { detectRea, findOnPath, updateNotice } from "../dist/setup.js";
 
 const posix = process.platform !== "win32";
 
@@ -49,13 +49,26 @@ test("lazy validator compiles a schema only when a result of that tool is first 
 test("REA detection searches PATH instead of running rea, and updateNotice never waits for rea --version", { skip: !posix }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "omr-startup-test-"));
   try {
+    // Load setup from a fixture checkout so its relative sibling search cannot reach the host's REA.
+    const omr = join(dir, "omr");
+    const dist = join(omr, "dist");
+    await mkdir(dist, { recursive: true });
+    await writeFile(join(omr, "package.json"), '{"type":"module"}');
+    for (const name of ["env.js", "setup.js", "reaLauncher.js", "version.js"]) {
+      await copyFile(new URL(`../dist/${name}`, import.meta.url), join(dist, name));
+    }
+    const { detectRea, detectReaExact, ensureRea, findOnPath, updateNotice } = await import(pathToFileURL(join(dist, "setup.js")).href);
+    const { resolveReaLauncher } = await import(pathToFileURL(join(dist, "reaLauncher.js")).href);
+
     const bin = join(dir, "bin");
     const config = join(dir, "config");
     await mkdir(bin, { recursive: true });
     await mkdir(join(config, "rea"), { recursive: true });
     const fake = join(bin, "rea");
-    // Like real REA, `--version` is slow; it also leaves a marker so a spawn is observable.
-    await writeFile(fake, `#!/bin/sh\ntouch "${join(dir, "ran")}"\nsleep 0.6\necho "rea 6.9.0"\n`);
+    const marker = join(dir, "ran");
+    await symlink(process.execPath, join(bin, "node"));
+    // Use the fixture PATH even inside the child. A delayed version and marker expose accidental sync probes.
+    await writeFile(fake, `#!/usr/bin/env node\nrequire("node:fs").writeFileSync(${JSON.stringify(marker)}, "ran");\nsetTimeout(() => console.log("rea 6.9.0"), 600);\n`);
     await chmod(fake, 0o755);
     await writeFile(join(config, "rea", "omr-update.json"), `${JSON.stringify({ checkedAt: Date.now(), latest: { "oh-my-rea": "0.0.1", "rea-agents": "7.0.0" } })}\n`);
     const env = { PATH: bin, XDG_CONFIG_HOME: config, HOME: dir };
@@ -63,10 +76,12 @@ test("REA detection searches PATH instead of running rea, and updateNotice never
     assert.equal(findOnPath("rea", env), fake);
     assert.equal(findOnPath("definitely-not-installed", env), undefined);
     assert.equal(findOnPath("rea", { PATH: join(dir, "empty") }), undefined);
+    const envFile = join(dir, "rea-env.sh");
+    await writeFile(envFile, `export OMR_REA_COMMAND=${JSON.stringify(fake)}\n`);
+    assert.equal(await ensureRea({ ...env, PATH: join(dir, "empty"), REA_ENV_FILE: envFile }), null);
 
-    const detected = detectRea(env);
-    assert.equal(detected.state, "ok");
-    await assert.rejects(readFile(join(dir, "ran")), { code: "ENOENT" }, "detectRea must not execute rea");
+    assert.deepEqual(detectRea(env), { state: "ok", source: "path", version: null });
+    await assert.rejects(readFile(marker), { code: "ENOENT" }, "detectRea must not execute rea");
 
     const started = performance.now();
     const notice = updateNotice(env);
@@ -88,6 +103,18 @@ test("REA detection searches PATH instead of running rea, and updateNotice never
     assert.match(updateNotice(env) ?? "", /rea 7\.0\.0/);
     assert.ok(performance.now() - second < 400);
     assert.equal(detectRea(env).version, "6.9.0");
+    assert.deepEqual(detectReaExact(env), { state: "ok", source: "path", version: "6.9.0" });
+
+    const siblingScripts = join(dir, "rea", "scripts");
+    const sibling = join(siblingScripts, "rea.mjs");
+    await mkdir(siblingScripts, { recursive: true });
+    await writeFile(sibling, 'console.log("rea 6.8.0");\n');
+    assert.deepEqual(resolveReaLauncher(env), { source: "checkout", path: sibling });
+    assert.deepEqual(detectRea(env), { state: "ok", source: "checkout", version: null });
+    assert.equal(updateNotice(env), null, "the cached PATH version does not describe the checkout");
+    const overridden = { ...env, OMR_REA_COMMAND: fake };
+    assert.deepEqual(resolveReaLauncher(overridden), { source: "env", path: fake });
+    assert.equal(updateNotice(overridden), null, "registry updates do not apply to the explicit override");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

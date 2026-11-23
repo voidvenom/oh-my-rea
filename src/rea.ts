@@ -1,8 +1,8 @@
 import type { Client } from "@modelcontextprotocol/client";
 import type { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
-import { existsSync, mkdirSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { resolveReaLauncher } from "./reaLauncher.js";
 import { asRecord } from "./values.js";
 import { VERSION } from "./version.js";
 import type { ChatImageBlock } from "./model.js";
@@ -169,15 +169,6 @@ export const normalizeMcpResult = (raw: unknown, durationMs = 0): ReaCallResult 
   };
 };
 
-/** When omr runs from a REA checkout, use that build so S1 journaling is present. */
-const siblingForkLauncher = (): string | undefined => {
-  const candidates = [
-    fileURLToPath(new URL("../../scripts/rea.mjs", import.meta.url)),
-    fileURLToPath(new URL("../../rea/scripts/rea.mjs", import.meta.url)),
-  ];
-  return candidates.find((candidate) => existsSync(candidate));
-};
-
 const isProcessAlive = (pid: number): boolean => {
   try {
     process.kill(pid, 0);
@@ -279,11 +270,12 @@ export class Rea implements ReaPort {
       import("@modelcontextprotocol/client/validators/ajv"),
       import("./lazyValidator.js"),
     ]);
-    const reaCommand = childEnv["OMR_REA_COMMAND"] ?? siblingForkLauncher();
+    const reaCommand = resolveReaLauncher(childEnv)?.path ?? "rea";
     // stderr is piped (never inherited) so REA diagnostics cannot corrupt the TUI's
     // alternate screen; a bounded tail is retained to explain unexpected exits.
-    const command = reaCommand?.endsWith(".mjs") ? process.execPath : reaCommand || "rea";
-    const args = reaCommand?.endsWith(".mjs") ? [reaCommand, "mcp"] : ["mcp"];
+    const isScript = reaCommand.endsWith(".mjs");
+    const command = isScript ? process.execPath : reaCommand;
+    const args = isScript ? [reaCommand, "mcp"] : ["mcp"];
     const launcher = sessionLauncher();
     const transport = new StdioClientTransport({ command: launcher ?? command, args: launcher ? ["--", command, ...args] : args, env: childEnv, stderr: "pipe" });
     let ownedPid: number | null = null, ownedGroup = false, releasing: Promise<void> | null = null;

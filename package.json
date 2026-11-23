@@ -43,7 +43,7 @@
     "build": "tsc -p tsconfig.json",
     "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test test/*.test.mjs",
+    "test": "npm run build && node test/run.mjs",
     "bench": "npm run build && node bench/platform.mjs",
     "bench:startup": "npm run build && node bench/startup.mjs",
     "eval": "npm run build && node eval/offline.mjs",
