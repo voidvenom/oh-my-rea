@@ -396,6 +396,8 @@ Create \`.omr/commands/<name>.md\` or run \`/save --as-command <name> <prompt>\`
   "launch.session": "omr {version} · {target} · session {id}{profile}",
   "launch.thinkingTag": " · thinking **{effort}**",
   "launch.unhandled": "unhandled error: {detail}",
+  "link.failed": "✗ Could not open {url}",
+  "link.opening": "↗ Opening {url}",
   "net.continuing": "network online · continuing session",
   "net.hold": "◈ net guard · network hold",
   "net.holding": "holding session state & processes",

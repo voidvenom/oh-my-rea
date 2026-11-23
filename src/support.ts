@@ -13,5 +13,10 @@ export const renderSupportLine = (
   const label = i18n.t("support.cta", { url: supportAddress }) || `☕ ${supportAddress}`;
   const fitted = visibleWidth(label) <= width ? label : truncateAnsi(supportAddress, width);
   if (!fitted) return "";
-  return `${theme.amber}${hyperlinks ? terminalLink(fitted, SUPPORT_URL) : fitted}${theme.reset}`;
+  // The address itself looks like a link (underline + link colour); the whole label is the click target.
+  const at = fitted.lastIndexOf(supportAddress);
+  const styled = theme.enabled && at >= 0
+    ? `${fitted.slice(0, at)}${theme.underline}${theme.sky}${supportAddress}${theme.reset}${theme.amber}${fitted.slice(at + supportAddress.length)}`
+    : fitted;
+  return `${theme.amber}${hyperlinks ? terminalLink(styled, SUPPORT_URL) : styled}${theme.reset}`;
 };

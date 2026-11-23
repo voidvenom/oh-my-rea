@@ -4,6 +4,15 @@ This project uses the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) f
 
 ## [Unreleased]
 
+### Added
+
+- Ctrl+click opens links in the TUI: URLs in answers, notices, drawers and the HUD (including URLs wrapped across lines), plus a plain click on the support link. Links are underlined in the link colour and still carry OSC 8 for terminals that open them natively. Only `http`, `https` and `mailto` URLs open, through `xdg-open`, `open` or `rundll32 url.dll,FileProtocolHandler`, launched directly without a shell. A short status toast confirms the launch.
+- Double-click selects a word and triple-click selects a line in the TUI.
+
+### Fixed
+
+- In-app mouse selection is now visible. The selected cells are drawn inverted while you drag, across wrapped and multi-line selections in the transcript, the startup splash, the HUD and the prompt. Display width is respected for wide characters, combining marks and Turkish letters. The highlight stays after the automatic copy and clears on Esc, Ctrl+C / Ctrl+Shift+C, a click elsewhere, or a resize.
+
 ## [0.7.0] - 2026-11-23
 
 ### Added

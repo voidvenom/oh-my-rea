@@ -186,6 +186,8 @@ export const centerAnsi = (text: string, width: number): string => {
 
 /**
  * Extract plain text from an ANSI-styled line between 0-based visual columns `[startCol, endCol)`.
+ * A wide glyph is included when the range touches either of its cells; zero-width marks
+ * (combining accents, joiners, variation selectors) follow their base character.
  */
 export const slicePlainByVisualCols = (
   text: string,
@@ -197,36 +199,52 @@ export const slicePlainByVisualCols = (
   let col = 0;
   let out = "";
   let i = 0;
-  while (i < plain.length && col < endCol) {
+  let included = false;
+  while (i < plain.length) {
     const cp = plain.codePointAt(i)!;
     const w = codePointWidth(cp);
     const step = cp > 0xffff ? 2 : 1;
-    if (col + w > startCol && col < endCol) {
-      out += plain.slice(i, i + step);
-    }
+    if (w > 0 && col >= endCol) break;
+    included = w === 0 ? included : col + w > startCol && col < endCol;
+    if (included) out += plain.slice(i, i + step);
     col += w;
     i += step;
   }
   return out;
 };
 
+/** One styled column range of a rendered line; `href` additionally wraps it in an OSC 8 hyperlink. */
+export interface VisualSpan {
+  readonly from: number;
+  readonly to: number;
+  readonly on: string;
+  readonly href?: string | undefined;
+}
+
+const isSgrReset = (sgr: string): boolean => sgr === "\x1b[0m" || sgr === "\x1b[m";
+
 /**
- * Apply inverse/selection highlight SGR across 0-based visual column span `[startCol, endCol)`
- * on an ANSI-styled line without breaking existing SGR sequences or visual width.
+ * Style 0-based visual column ranges of an ANSI-styled line without changing its width.
+ * The span style is re-applied after every SGR the line itself emits inside the span (so a
+ * coloured token or a `reset` cannot cancel it), and on exit the line's own SGR state since its
+ * last reset is replayed, so background, colour and attributes after the span are unchanged.
+ * Spans must be sorted and non-overlapping.
  */
-export const highlightVisualCols = (
-  text: string,
-  startCol: number,
-  endCol: number,
-  highlightOn = "\x1b[7m",
-  highlightOff = "\x1b[27m",
-): string => {
-  if (endCol <= startCol || !text) return text;
+export const styleVisualSpans = (text: string, spans: readonly VisualSpan[]): string => {
+  const active = spans.filter((span) => span.to > span.from);
+  if (!text || active.length === 0) return text;
   let col = 0;
   let i = 0;
   const len = text.length;
-  let inHighlight = false;
   let out = "";
+  let state = "";
+  let spanIdx = 0;
+  let current: VisualSpan | null = null;
+  const exit = (): void => {
+    if (!current) return;
+    out += `${current.href ? OSC8_CLOSE : ""}\x1b[0m${state}`;
+    current = null;
+  };
   while (i < len) {
     const c = text.charCodeAt(i);
     if (c === 0x1b && text.charCodeAt(i + 1) === 0x5b) {
@@ -234,10 +252,9 @@ export const highlightVisualCols = (
       while (end < len && text.charCodeAt(end) !== 0x6d) end += 1;
       if (end < len) {
         const sgr = text.slice(i, end + 1);
+        state = isSgrReset(sgr) ? "" : state + sgr;
         out += sgr;
-        if (inHighlight && (sgr === "\x1b[0m" || sgr === "\x1b[m")) {
-          out += highlightOn;
-        }
+        if (current) out += current.on;
         i = end + 1;
         continue;
       }
@@ -253,21 +270,40 @@ export const highlightVisualCols = (
     const cp = text.codePointAt(i)!;
     const w = codePointWidth(cp);
     const step = cp > 0xffff ? 2 : 1;
-    const shouldHighlight = col + w > startCol && col < endCol;
-    if (shouldHighlight && !inHighlight) {
-      out += highlightOn;
-      inHighlight = true;
-    } else if (!shouldHighlight && inHighlight) {
-      out += highlightOff;
-      inHighlight = false;
+    // Zero-width marks stay with their base character, so only printing cells move the span edges.
+    if (w > 0) {
+      while (spanIdx < active.length && active[spanIdx]!.to <= col) spanIdx += 1;
+      const span = active[spanIdx];
+      const want = span && col + w > span.from && col < span.to ? span : null;
+      if (want !== current) {
+        exit();
+        if (want) {
+          out += `${want.href ? `\x1b]8;;${want.href}\x07` : ""}${want.on}`;
+          current = want;
+        }
+      }
     }
     out += text.slice(i, i + step);
     col += w;
     i += step;
   }
-  if (inHighlight) out += highlightOff;
+  exit();
   return out;
 };
+
+/** Default selection style: SGR 7 inverse, readable over any foreground/background colour. */
+export const SELECTION_STYLE = "\x1b[7m";
+
+/**
+ * Apply the selection highlight across 0-based visual column span `[startCol, endCol)`
+ * on an ANSI-styled line without breaking existing SGR sequences or visual width.
+ */
+export const highlightVisualCols = (
+  text: string,
+  startCol: number,
+  endCol: number,
+  highlightOn = SELECTION_STYLE,
+): string => styleVisualSpans(text, [{ from: startCol, to: endCol, on: highlightOn }]);
 
 /** Word-wrap plain text in linear O(N) time by visual column width. */
 export const wrapPlain = (

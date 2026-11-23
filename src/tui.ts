@@ -13,6 +13,7 @@ import {
   slicePlainByVisualCols,
   stripAnsi,
   styleInlineMarkdown,
+  styleVisualSpans,
   truncateAnsi,
   visibleWidth,
   wrapPlain,
@@ -29,6 +30,15 @@ import { summarizeToolCall } from "./broker.js";
 import { normalizeTypedAhead, takeEarlyInput } from "./earlyInput.js";
 import { I18n, type LocalizedMessage, type MessageKey } from "./i18n/index.js";
 import { ledgerHealthLabel } from "./render.js";
+import { linkAt, linkSpansForLines, type LinkSpan } from "./links.js";
+import {
+  ClickCounter,
+  lineRange,
+  selectionRowSpans,
+  wordRangeAt,
+  type RowSpan,
+  type SelectionRegion,
+} from "./selection.js";
 import {
   copyTextToClipboard,
   isKlipperImagePlaceholder,
@@ -145,6 +155,8 @@ export interface UiOptions {
     | null;
   onClipboardText?: () => Promise<string | null> | string | null;
   onCopyText?: (text: string) => void;
+  /** Opens a validated link; defaults to the platform opener (xdg-open / open / rundll32). */
+  onOpenUrl?: (url: string) => void;
   onInterrupt: () => void;
   onExit: () => void;
   onOpenModelPicker?: (focusProviderId?: string | null) => void;
@@ -208,13 +220,34 @@ type TimelineEntry =
   | { kind: "system"; text: string; rev: number; startup?: boolean; localize?: LocalizedMessage; cache?: EntryRenderCache }
   | { kind: "error"; text: string; rev: number; cache?: EntryRenderCache };
 
+/**
+ * In-app mouse selection. Transcript selections use logical transcript line indices (so they
+ * stay on their text while it scrolls); HUD and composer selections use frame rows. Columns are
+ * display columns relative to the region's left edge.
+ */
 interface ViewportSelection {
+  region: SelectionRegion;
   startLineIdx: number;
   startCol: number;
   endLineIdx: number;
   endCol: number;
   dragging: boolean;
+  /** Double-click selects a word and triple-click a line; dragging only extends `char` selections. */
+  mode: "char" | "word" | "line";
 }
+
+/** A rectangle of frame cells (0-based rows/columns). */
+interface FrameRegion {
+  readonly top: number;
+  readonly height: number;
+  readonly left: number;
+  readonly width: number;
+}
+
+/** Frame row of the first transcript line; row 0 is the top bar. */
+const VIEWPORT_TOP_ROW = 1;
+/** Frame column where transcript text starts, after the `│ ` border. */
+const VIEWPORT_LEFT_COL = 2;
 
 interface PaletteItem {
   readonly kind: "command" | "path" | "arg" | "mention";
@@ -563,7 +596,18 @@ export class TerminalUi {
     height: number;
     leftCellWidth: number;
     lines: readonly string[];
+    hero?: boolean;
   } = { startLine: 0, height: 0, leftCellWidth: 0, lines: [] };
+  private frameRegions: { hud: FrameRegion | null; composer: FrameRegion | null } = { hud: null, composer: null };
+  /** Frame lines of the last rendered main frame, used to copy HUD/composer selections. */
+  private lastFrameLines: readonly string[] = [];
+  /** Clickable links of the last rendered frame by row, in absolute frame columns. */
+  private frameLinks = new Map<number, LinkSpan[]>();
+  /** Transcript links of the visible viewport rows (row relative to the viewport, columns to its text). */
+  private viewportLinks: { row: number; span: LinkSpan }[] = [];
+  private readonly clickCounter = new ClickCounter();
+  /** OSC 8 link under a plain press; opened on release when the press did not become a selection. */
+  private pendingPlainLink: string | null = null;
   private clipboardNotice: { text: LocalizedMessage; until: number } | null = null;
   private clipboardNoticeTimer: NodeJS.Timeout | null = null;
 
@@ -1513,6 +1557,8 @@ export class TerminalUi {
 
   private onResize = (): void => {
     this.prevLines = [];
+    // Line indices and frame cells change with the width, so an old selection would point elsewhere.
+    this.selection = null;
     this.paint();
   };
 
@@ -1826,79 +1872,171 @@ export class TerminalUi {
     if (this.picker.open || this.outputExpanded)
       return;
 
-    const layout = this.lastViewportLayout;
+    if (baseBtn !== 0) return;
+    const row0 = row1Based - 1;
+    const col0 = col1Based - 1;
 
-    // Left mouse button press/drag/release inside the chat viewport
-    if (baseBtn === 0) {
-      const relRow = row1Based - 2; // Row 1 is top bar, Row 2..1+height is viewport
-      const relCol = Math.max(
-        0,
-        Math.min(layout.leftCellWidth, col1Based - 3),
-      );
-      if (!isRelease && !isMotion) {
-        // Initial press
-        if (
-          relRow >= 0 &&
-          relRow < layout.height &&
-          col1Based >= 2 &&
-          col1Based <= layout.leftCellWidth + 2 &&
-          layout.lines.length > 0
-        ) {
-          const lineIdx = Math.max(
-            0,
-            Math.min(layout.lines.length - 1, layout.startLine + relRow),
-          );
-          this.selection = {
-            startLineIdx: lineIdx,
-            startCol: relCol,
-            endLineIdx: lineIdx,
-            endCol: relCol,
-            dragging: true,
-          };
-          this.paint();
-        } else if (this.selection) {
+    // Left press: Ctrl+click opens a link; otherwise start a (word/line) selection.
+    if (!isRelease && !isMotion) {
+      const link = linkAt(this.frameLinks.get(row0), col0);
+      if (link && (btn & 16) === 16) {
+        this.clickCounter.reset();
+        this.pendingPlainLink = null;
+        this.openLink(link.url);
+        return;
+      }
+      this.pendingPlainLink = link?.osc8 ? link.url : null;
+      const hit = this.selectionHit(row0, col0);
+      if (!hit) {
+        if (this.selection) {
           this.selection = null;
           this.paint();
         }
         return;
       }
+      const clicks = this.clickCounter.press(row0, col0, Date.now());
+      let from = hit.col;
+      let to = hit.col;
+      let mode: ViewportSelection["mode"] = "char";
+      if (clicks > 1) {
+        const plain = this.selectionLinePlain(hit.region, hit.line);
+        const range = clicks === 2 ? wordRangeAt(plain, hit.col) : lineRange(plain);
+        if (range) {
+          from = range.from;
+          to = range.to;
+          mode = clicks === 2 ? "word" : "line";
+        }
+      }
+      this.selection = {
+        region: hit.region,
+        startLineIdx: hit.line,
+        startCol: from,
+        endLineIdx: hit.line,
+        endCol: to,
+        dragging: true,
+        mode,
+      };
+      this.paint();
+      return;
+    }
 
-      if (isMotion && this.selection?.dragging && layout.lines.length > 0) {
+    if (isMotion) {
+      const sel = this.selection;
+      if (!sel?.dragging || sel.mode !== "char") return;
+      this.pendingPlainLink = null;
+      if (sel.region === "transcript") {
+        const layout = this.lastViewportLayout;
+        if (layout.lines.length === 0) return;
+        const relRow = row0 - VIEWPORT_TOP_ROW;
+        // Dragging past the top/bottom edge scrolls the transcript.
         if (relRow < 0) {
-          this.scroll = Math.min(
-            Math.max(0, layout.lines.length - layout.height),
-            this.scroll + 1,
-          );
+          this.scroll = Math.min(Math.max(0, layout.lines.length - layout.height), this.scroll + 1);
         } else if (relRow >= layout.height) {
           this.scroll = Math.max(0, this.scroll - 1);
         }
         const clampedRow = Math.max(0, Math.min(layout.height - 1, relRow));
-        const lineIdx = Math.max(
-          0,
-          Math.min(layout.lines.length - 1, layout.startLine + clampedRow),
-        );
-        this.selection.endLineIdx = lineIdx;
-        this.selection.endCol = relCol;
-        this.paint();
-        return;
+        sel.endLineIdx = Math.max(0, Math.min(layout.lines.length - 1, layout.startLine + clampedRow));
+        sel.endCol = Math.max(0, Math.min(layout.leftCellWidth, col0 - VIEWPORT_LEFT_COL));
+      } else {
+        const region = this.frameRegions[sel.region];
+        if (!region) return;
+        sel.endLineIdx = Math.max(region.top, Math.min(region.top + region.height - 1, row0));
+        sel.endCol = Math.max(0, Math.min(region.width, col0 - region.left));
       }
+      this.paint();
+      return;
+    }
 
-      if (isRelease && this.selection) {
-        this.selection.dragging = false;
-        if (this.hasActiveSelection()) {
-          const selected = this.extractSelectedText();
-          if (selected.trim().length > 0) {
-            this.writeToClipboard(selected);
-            this.setClipboardNotice(
-              (t) => t("clipboard.selection", { count: selected.length }),
-            );
-          }
-        } else {
-          this.selection = null;
+    // Release: copy a real selection (and keep it highlighted); a plain click on an OSC 8 link opens it.
+    const plainLink = this.pendingPlainLink;
+    this.pendingPlainLink = null;
+    if (this.selection) {
+      this.selection.dragging = false;
+      if (this.hasActiveSelection()) {
+        const selected = this.extractSelectedText();
+        if (selected.trim().length > 0) {
+          this.writeToClipboard(selected);
+          this.setClipboardNotice(
+            (t) => t("clipboard.selection", { count: selected.length }),
+          );
         }
-        this.paint();
+      } else {
+        this.selection = null;
       }
     }
+    if (plainLink && !this.hasActiveSelection()) this.openLink(plainLink);
+    this.paint();
+  }
+
+  /** Which selectable region a frame cell belongs to, as a selection point in that region. */
+  private selectionHit(row0: number, col0: number): { region: SelectionRegion; line: number; col: number } | null {
+    const layout = this.lastViewportLayout;
+    const relRow = row0 - VIEWPORT_TOP_ROW;
+    if (
+      relRow >= 0 &&
+      relRow < layout.height &&
+      col0 >= VIEWPORT_LEFT_COL - 1 &&
+      col0 <= layout.leftCellWidth + VIEWPORT_LEFT_COL &&
+      layout.lines.length > 0
+    ) {
+      return {
+        region: "transcript",
+        line: Math.max(0, Math.min(layout.lines.length - 1, layout.startLine + relRow)),
+        col: Math.max(0, Math.min(layout.leftCellWidth, col0 - VIEWPORT_LEFT_COL)),
+      };
+    }
+    for (const region of ["hud", "composer"] as const) {
+      const area = this.frameRegions[region];
+      if (!area) continue;
+      if (row0 >= area.top && row0 < area.top + area.height && col0 >= area.left - 1 && col0 <= area.left + area.width) {
+        return { region, line: row0, col: Math.max(0, Math.min(area.width, col0 - area.left)) };
+      }
+    }
+    return null;
+  }
+
+  /** Plain text of one selectable line (transcript line or region slice of a frame row). */
+  private selectionLinePlain(region: SelectionRegion, line: number): string {
+    if (region === "transcript") return stripAnsi(this.lastViewportLayout.lines[line] ?? "");
+    const area = this.frameRegions[region];
+    return area ? slicePlainByVisualCols(this.lastFrameLines[line] ?? "", area.left, area.left + area.width) : "";
+  }
+
+  /** Frame cells covered by the active selection in the frame being built. */
+  private selectionScreenSpans(frame: readonly string[]): RowSpan[] {
+    const norm = this.normalizedSelection();
+    const sel = this.selection;
+    if (!norm || !sel) return [];
+    if (sel.region === "transcript") {
+      const layout = this.lastViewportLayout;
+      return selectionRowSpans(
+        norm,
+        { firstLine: layout.startLine, height: layout.height, rowOffset: VIEWPORT_TOP_ROW, colOffset: VIEWPORT_LEFT_COL, width: layout.leftCellWidth },
+        (line) => visibleWidth(layout.lines[line] ?? ""),
+      );
+    }
+    const area = this.frameRegions[sel.region];
+    if (!area) return [];
+    return selectionRowSpans(
+      norm,
+      { firstLine: area.top, height: area.height, rowOffset: area.top, colOffset: area.left, width: area.width },
+      (row) => visibleWidth(slicePlainByVisualCols(frame[row] ?? "", area.left, area.left + area.width).trimEnd()),
+    );
+  }
+
+  private openLink(url: string): void {
+    const shown = truncateAnsi(url, 64);
+    this.setClipboardNotice((t) => t("link.opening", { url: shown }));
+    if (this.options.onOpenUrl) {
+      this.options.onOpenUrl(url);
+      return;
+    }
+    void import("./opener.js")
+      .then(({ openUrl }) => openUrl(url))
+      .then((result) => {
+        if (!result.ok) this.setClipboardNotice((t) => t("link.failed", { url: shown }));
+      })
+      .catch(() => {});
   }
 
   private hasActiveSelection(): boolean {
@@ -1938,16 +2076,20 @@ export class TerminalUi {
 
   extractSelectedText(): string {
     const norm = this.normalizedSelection();
-    const lines = this.lastViewportLayout.lines;
-    if (!norm || lines.length === 0) return "";
+    const sel = this.selection;
+    if (!norm || !sel) return "";
+    const area = sel.region === "transcript" ? null : this.frameRegions[sel.region];
+    const lines = area ? this.lastFrameLines : this.lastViewportLayout.lines;
+    if (lines.length === 0 || (sel.region !== "transcript" && !area)) return "";
+    const offset = area?.left ?? 0;
     const out: string[] = [];
     for (let idx = norm.startLine; idx <= norm.endLine; idx += 1) {
       const line = lines[idx];
       if (line === undefined) continue;
-      const maxCol = visibleWidth(line);
+      const maxCol = area ? area.width : visibleWidth(line);
       const fromCol = idx === norm.startLine ? norm.startCol : 0;
       const toCol = idx === norm.endLine ? norm.endCol : maxCol;
-      out.push(slicePlainByVisualCols(line, fromCol, toCol).trimEnd());
+      out.push(slicePlainByVisualCols(line, offset + fromCol, offset + Math.min(maxCol, toCol)).trimEnd());
     }
     return out.join("\n").trim();
   }
@@ -3762,6 +3904,11 @@ export class TerminalUi {
       hudWidth > 0
         ? this.renderHudSidebar(rightCellWidth, viewportBodyRows)
         : [];
+    // Row 0 is the top bar; `│ ` + left cell + ` │ ` puts the HUD cell at column leftCellWidth + 5.
+    const hudRegion: FrameRegion | null = hudWidth > 0
+      ? { top: VIEWPORT_TOP_ROW, height: viewportBodyRows, left: leftCellWidth + VIEWPORT_LEFT_COL + 3, width: rightCellWidth }
+      : null;
+    const hudLinks = this.decorateHudLinks(hudRegion, rightRows);
 
     for (let r = 0; r < viewportBodyRows; r += 1) {
       const leftCell = padEndAnsi(leftRows[r] ?? "", leftCellWidth);
@@ -3868,6 +4015,25 @@ export class TerminalUi {
     // Normalize exact row count
     while (frame.length < rows) frame.push("");
     if (frame.length > rows) frame.length = rows;
+
+    // Links below the transcript (drawers, support row, composer title) are clickable too; the
+    // HUD/transcript links were collected above. Then the selection is drawn over everything.
+    const linkRows: number[] = [];
+    for (let row = VIEWPORT_TOP_ROW + viewportBodyRows; row <= composerTopRowIndex && row < frame.length; row += 1) linkRows.push(row);
+    this.collectFrameLinks(frame, linkRows, hudLinks);
+    this.frameRegions = {
+      hud: hudRegion,
+      composer: {
+        top: composerTopRowIndex + 1,
+        height: composerInnerHeight,
+        left: VIEWPORT_LEFT_COL + visibleWidth(promptPrefix),
+        width: composerTextWidth,
+      },
+    };
+    for (const span of this.selectionScreenSpans(frame)) {
+      frame[span.row] = highlightVisualCols(frame[span.row] ?? "", span.from, span.to);
+    }
+    this.lastFrameLines = frame;
 
     const cursorLineInBox = wrappedComposer.row - composerStartLine;
     const cursorRow1Based =
@@ -4007,39 +4173,100 @@ export class TerminalUi {
         ...hero,
         ...notices,
       ];
+      if (this.lastViewportLayout.hero === false && this.selection?.region === "transcript") this.selection = null;
       this.lastViewportLayout = {
         startLine: 0,
         height,
         leftCellWidth: width,
         lines: shownHero,
+        hero: true,
       };
-      return shownHero;
+      return this.decorateViewportLinks(shownHero, 0, shownHero, width);
     }
 
     const lines = this.renderTimelineLines(width);
     const maxScroll = Math.max(0, lines.length - height);
     this.scroll = Math.min(this.scroll, maxScroll);
     const start = Math.max(0, lines.length - height - this.scroll);
+    // Hero-splash line indices mean nothing in the transcript, so a splash selection ends with it.
+    if (this.lastViewportLayout.hero && this.selection?.region === "transcript") this.selection = null;
     this.lastViewportLayout = {
       startLine: start,
       height,
       leftCellWidth: width,
       lines,
+      hero: false,
     };
+    return this.decorateViewportLinks(lines, start, lines.slice(start, start + height), width);
+  }
 
-    const visible = lines.slice(start, start + height);
-    const normSel = this.normalizedSelection();
-    if (!normSel) return visible;
+  private linkStyle(): string {
+    return this.theme.enabled ? `${this.theme.underline}${this.theme.sky}` : "";
+  }
 
-    const highlightStyle = `${this.theme.selBg}${this.theme.fgBright}${this.theme.bold}`;
-    return visible.map((line, relIdx) => {
-      const absIdx = start + relIdx;
-      if (absIdx < normSel.startLine || absIdx > normSel.endLine) return line;
-      const maxW = visibleWidth(line);
-      const fromCol = absIdx === normSel.startLine ? normSel.startCol : 0;
-      const toCol = absIdx === normSel.endLine ? normSel.endCol : maxW;
-      return highlightVisualCols(line, fromCol, toCol, highlightStyle);
+  /**
+   * Underlines and colours the links on the visible transcript rows (wrapped URLs included), wraps
+   * them in OSC 8 for terminals that open links themselves, and records them for Ctrl+click.
+   */
+  private decorateViewportLinks(
+    lines: readonly string[],
+    start: number,
+    visible: readonly string[],
+    width: number,
+  ): string[] {
+    this.viewportLinks = [];
+    const found = linkSpansForLines(lines, start, start + visible.length, width);
+    if (found.size === 0) return [...visible];
+    return visible.map((line, rel) => {
+      const spans = found.get(start + rel);
+      if (!spans) return line;
+      for (const span of spans) this.viewportLinks.push({ row: rel, span });
+      return this.decorateLinks(line, spans);
     });
+  }
+
+  private decorateLinks(line: string, spans: readonly LinkSpan[]): string {
+    const style = this.linkStyle();
+    const styled = spans
+      .filter((span) => !span.osc8)
+      .map((span) => ({ from: span.from, to: span.to, on: style, href: this.hyperlinks ? span.url : undefined }));
+    return styled.length > 0 ? styleVisualSpans(line, styled) : line;
+  }
+
+  /** Styles links inside HUD cells (in place) and returns them by frame row in frame columns. */
+  private decorateHudLinks(hud: FrameRegion | null, hudRows: string[]): Map<number, LinkSpan[]> {
+    const links = new Map<number, LinkSpan[]>();
+    if (!hud) return links;
+    for (const [rel, spans] of linkSpansForLines(hudRows, 0, hudRows.length, Number.POSITIVE_INFINITY, 0)) {
+      hudRows[rel] = this.decorateLinks(hudRows[rel]!, spans);
+      links.set(hud.top + rel, spans.map((span) => ({ ...span, from: span.from + hud.left, to: span.to + hud.left })));
+    }
+    return links;
+  }
+
+  /**
+   * Records every clickable link of the frame by row (absolute columns): transcript links from
+   * the viewport, HUD links, and links on `rows` (drawers, support row, composer title), which
+   * are styled here.
+   */
+  private collectFrameLinks(frame: string[], rows: readonly number[], hudLinks: Map<number, LinkSpan[]>): void {
+    const links = new Map<number, LinkSpan[]>(hudLinks);
+    const push = (row: number, span: LinkSpan): void => {
+      const list = links.get(row) ?? [];
+      list.push(span);
+      links.set(row, list);
+    };
+    for (const { row, span } of this.viewportLinks) {
+      push(VIEWPORT_TOP_ROW + row, { ...span, from: span.from + VIEWPORT_LEFT_COL, to: span.to + VIEWPORT_LEFT_COL });
+    }
+    for (const row of rows) {
+      const spans = linkSpansForLines(frame, row, row + 1, Number.POSITIVE_INFINITY, 0).get(row);
+      if (!spans) continue;
+      frame[row] = this.decorateLinks(frame[row]!, spans);
+      for (const span of spans) push(row, span);
+    }
+    for (const list of links.values()) list.sort((a, b) => a.from - b.from);
+    this.frameLinks = links;
   }
 
   private isTickAnimatedEntry(entry: TimelineEntry): boolean {

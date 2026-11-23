@@ -398,6 +398,8 @@ Eklemek için \`.omr/commands/<name>.md\` oluşturun veya \`/save --as-command <
   "launch.session": "omr {version} · {target} · oturum {id}{profile}",
   "launch.thinkingTag": " · düşünme **{effort}**",
   "launch.unhandled": "İşlenmeyen hata: {detail}",
+  "link.failed": "✗ Açılamadı: {url}",
+  "link.opening": "↗ Açılıyor: {url}",
   "net.continuing": "bağlantı var · oturum sürüyor",
   "net.hold": "◈ ağ koruması · bağlantı bekleniyor",
   "net.holding": "oturum durumu ve süreçler korunuyor",
