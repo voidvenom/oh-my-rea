@@ -7,7 +7,21 @@ export const ESC = "\x1b[";
 export const SYNC_START = "\x1b[?2026h";
 export const SYNC_END = "\x1b[?2026l";
 
-const ANSI_SGR_RE = /\x1b\[[0-9;]*m/g;
+const ANSI_DECORATION_RE = /\x1b\[[0-9;]*m|\x1b\]8;[^\x07\x1b]*(?:\x07|\x1b\\)/g;
+const OSC8_CLOSE = "\x1b]8;;\x07";
+
+export const terminalLink = (label: string, href: string): string =>
+  `\x1b]8;;${href}\x07${label}${OSC8_CLOSE}`;
+
+/** End of a complete OSC 8 sequence, or the original offset. */
+const osc8End = (text: string, start: number): number => {
+  if (!text.startsWith("\x1b]8;", start)) return start;
+  for (let i = start + 4; i < text.length; i += 1) {
+    if (text[i] === "\x07") return i + 1;
+    if (text[i] === "\x1b") return text[i + 1] === "\\" ? i + 2 : start;
+  }
+  return start;
+};
 // Strip all escape sequences (CSI, OSC, DCS/APC/PM, 2-byte ESC) from untrusted text.
 const UNSAFE_ESCAPE_RE =
   /\x1b\][\s\S]*?(?:\x07|\x1b\\)|\x1b[P_^][\s\S]*?\x1b\\|\x1b\[[0-9;?<=>! ]*[@-~]|\x1b[@-_]|\x1b/g;
@@ -29,7 +43,7 @@ export const sanitizeText = (input: string, tabWidth = 2): string => {
 };
 
 export const stripAnsi = (input: string): string =>
-  input.replace(ANSI_SGR_RE, "");
+  input.replace(ANSI_DECORATION_RE, "");
 
 const isZeroWidth = (cp: number): boolean =>
   cp === 0x200b ||
@@ -69,10 +83,10 @@ const isWideCodePoint = (cp: number): boolean =>
 export const codePointWidth = (cp: number): number => {
   if (cp < 0x20 || (cp >= 0x7f && cp < 0xa0)) return 0;
   if (isZeroWidth(cp)) return 0;
-  return cp === 0x26a1 || isWideCodePoint(cp) ? 2 : 1; // ⚡ has emoji presentation.
+  return cp === 0x2615 || cp === 0x26a1 || isWideCodePoint(cp) ? 2 : 1; // ☕ and ⚡ have emoji presentation.
 };
 
-/** Visual terminal column width of a string (ignoring ANSI SGR codes). */
+/** Visual terminal column width, ignoring SGR and OSC 8 decorations. */
 export const visibleWidth = (text: string): number => {
   let width = 0;
   let i = 0;
@@ -89,6 +103,13 @@ export const visibleWidth = (text: string): number => {
       while (end < len && text.charCodeAt(end) !== 0x6d) end += 1;
       if (end < len) {
         i = end + 1;
+        continue;
+      }
+    }
+    if (c === 0x1b && text.charCodeAt(i + 1) === 0x5d) {
+      const end = osc8End(text, i);
+      if (end > i) {
+        i = end;
         continue;
       }
     }
@@ -114,6 +135,7 @@ export const truncateAnsi = (
   const target = Math.max(0, maxCols - ellWidth);
   let cols = 0;
   let hasAnsi = false;
+  let hasLink = false;
   let i = 0;
   const len = text.length;
   while (i < len) {
@@ -124,6 +146,14 @@ export const truncateAnsi = (
       if (end < len) {
         hasAnsi = true;
         i = end + 1;
+        continue;
+      }
+    }
+    if (c === 0x1b && text.charCodeAt(i + 1) === 0x5d) {
+      const end = osc8End(text, i);
+      if (end > i) {
+        hasLink = true;
+        i = end;
         continue;
       }
     }
@@ -139,13 +169,19 @@ export const truncateAnsi = (
     cols += w;
     i += cp > 0xffff ? 2 : 1;
   }
-  return `${text.slice(0, i)}${hasAnsi ? "\x1b[0m" : ""}${maxCols >= ellWidth ? ellipsis : ""}`;
+  return `${text.slice(0, i)}${hasLink ? OSC8_CLOSE : ""}${hasAnsi ? "\x1b[0m" : ""}${maxCols >= ellWidth ? ellipsis : ""}`;
 };
 
 export const padEndAnsi = (text: string, width: number): string => {
   const clipped = truncateAnsi(text, width);
   const pad = Math.max(0, width - visibleWidth(clipped));
   return pad > 0 ? `${clipped}${" ".repeat(pad)}` : clipped;
+};
+
+export const centerAnsi = (text: string, width: number): string => {
+  const columns = visibleWidth(text);
+  if (columns >= width) return truncateAnsi(text, width);
+  return `${" ".repeat(Math.floor((width - columns) / 2))}${text}`;
 };
 
 /**
@@ -203,6 +239,14 @@ export const highlightVisualCols = (
           out += highlightOn;
         }
         i = end + 1;
+        continue;
+      }
+    }
+    if (c === 0x1b && text.charCodeAt(i + 1) === 0x5d) {
+      const end = osc8End(text, i);
+      if (end > i) {
+        out += text.slice(i, end);
+        i = end;
         continue;
       }
     }

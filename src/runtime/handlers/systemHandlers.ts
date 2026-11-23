@@ -53,17 +53,17 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
   registry.register("lang", async (ctx, rest) => {
     const i18n = ctx.output.i18n;
     const args = rest ? rest.split(/\s+/) : [];
-    const save = args.includes("--save");
+    const legacySave = args.includes("--save");
     const codes = args.filter((arg) => arg !== "--save");
     const language = codes.length === 1 ? parseLanguage(codes[0]) : codes.length === 0 ? i18n.language : undefined;
-    if (!language || args.length !== codes.length + Number(save)) {
+    if (!language || args.length !== codes.length + Number(legacySave)) {
       ctx.output.fail(i18n.t("language.usage"));
       return;
     }
     await i18n.switchTo(language);
     ctx.output.ui?.setCommands(ctx.allCommands());
     let saved: string | null = null;
-    if (save) {
+    if (codes.length > 0 || legacySave) {
       try {
         saved = saveModelRuntimeSettings({ language }, ctx.env).path;
       } catch (error) {

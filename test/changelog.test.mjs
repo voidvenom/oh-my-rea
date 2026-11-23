@@ -6,9 +6,12 @@ import { VERSION } from "../dist/version.js";
 
 test("the packaged changelog covers the current version and lists releases newest first", async () => {
   const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  const lock = JSON.parse(await readFile(new URL("../package-lock.json", import.meta.url), "utf8"));
   const markdown = await readFile(CHANGELOG_FILE, "utf8");
   const sections = parseChangelog(markdown);
   assert.equal(pkg.version, VERSION);
+  assert.equal(lock.version, VERSION);
+  assert.equal(lock.packages[""].version, VERSION);
   assert.ok(pkg.files.includes("CHANGELOG.md"));
   assert.ok(sections.has(VERSION));
   assert.equal([...sections.keys()][0], "Unreleased");

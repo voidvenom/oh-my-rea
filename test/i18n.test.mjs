@@ -109,7 +109,14 @@ test("the CLI loads only its selected catalog, saves language additively and pre
     const help = await invoke(["--lang", "tr", "--help"], ["--import", loader]);
     assert.equal(help.stderr, "catalog: tr\n");
     assert.match(help.stdout, /Kullanım:/);
-    assert.match(help.stdout, /\/lang \[en\|tr\] \[--save\].*Arayüz dilini göster veya değiştir/);
+    assert.match(help.stdout, /\/lang \[en\|tr\].*Kayıtlı arayüz dilini göster veya değiştir/);
+    assert.doesNotMatch(help.stdout, /\/lang \[en\|tr\] \[--save\]/);
+    assert.match(help.stdout.trimEnd(), /omr’ı destekle: https:\/\/buymeacoffee\.com\/omrdev$/);
+    const englishHelp = await invoke(["--lang", "en", "--help"]);
+    assert.match(englishHelp.stdout.trimEnd(), /Support omr: https:\/\/buymeacoffee\.com\/omrdev$/);
+    assert.doesNotMatch((await invoke(["--help", "--json"])).stdout, /buymeacoffee/);
+    assert.doesNotMatch((await invoke(["--no-model", "/help"])).stdout, /buymeacoffee/);
+    assert.equal(await readFile(config, "utf8"), previous);
     const switched = await invoke(["--no-model", "/language", "tr", "--save"]);
     assert.match(switched.stdout, /Dil: tr \(Türkçe\)/);
     assert.deepEqual(JSON.parse(await readFile(config, "utf8")), { language: "tr", opaque_setting: 17 });
@@ -136,7 +143,7 @@ test("the CLI loads only its selected catalog, saves language additively and pre
   }
 });
 
-test("a Turkish-locale PTY starts in Turkish and /lang en --save survives a restart", {
+test("a Turkish-locale PTY paints its splash immediately and /lang persists across restarts", {
   skip: process.platform === "win32",
 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "omr-lang-pty-"));
@@ -145,23 +152,35 @@ test("a Turkish-locale PTY starts in Turkish and /lang en --save survives a rest
       ...fixtureEnvironment(), HOME: root, LANG: "tr_TR.UTF-8", LC_ALL: "", LC_MESSAGES: "",
       XDG_CONFIG_HOME: join(root, "config"), OMR_SESSIONS_DIR: join(root, "sessions"),
       OMR_SKIP_SETUP: "1", OMR_NO_UPDATE_CHECK: "1", OMR_REA_COMMAND: join(root, "missing-rea"),
+      TERM: "xterm-256color", NO_COLOR: "1",
     };
     delete env.OMR_LANG;
-    const probe = async (command, expected) => {
+    const dump = join(root, "pty.log");
+    const probe = async (command, expected, args = [], overrides = {}) => {
       const { stdout } = await run("python3", [
         ptyProbe, "--after-alt", "--timeout", "5", "--type", `${command}\r`,
+        "--dump", dump,
         "--mark", `result=${expected}`, "--stop-on", "result",
-        "--", process.execPath, cli, "--no-model",
-      ], { cwd: root, env, timeout: 10_000 });
+        "--", process.execPath, cli, "--no-model", ...args,
+      ], { cwd: root, env: { ...env, ...overrides }, timeout: 10_000 });
       const result = JSON.parse(stdout);
       assert.notEqual(result.altScreenMs, null, stdout);
       assert.notEqual(result.marks.result, null, `${command}: expected ${expected}\n${stdout}`);
     };
 
     await probe("/lang", "Dil: tr (Türkçe)");
-    await probe("/lang en --save", "Saved to ");
-    const config = JSON.parse(await readFile(join(env.XDG_CONFIG_HOME, "rea", "omr-model.json"), "utf8"));
-    assert.equal(config.language, "en");
+    const firstFrame = (await readFile(dump, "utf8")).split("\x1b[?2026l", 1)[0];
+    assert.match(firstFrame, /██████/);
+    assert.ok(firstFrame.includes("\x1b]8;;https://buymeacoffee.com/omrdev\x07"));
+    assert.match(firstFrame, /\/lang en · \/lang tr/);
+
+    const configPath = join(env.XDG_CONFIG_HOME, "rea", "omr-model.json");
+    await probe("/lang en", "Saved to ");
+    assert.equal(JSON.parse(await readFile(configPath, "utf8")).language, "en");
+    await probe("/lang", "Language: en (English)");
+    await probe("/lang", "Dil: tr (Türkçe)", ["--lang", "tr"]);
+    await probe("/lang", "Dil: tr (Türkçe)", [], { OMR_LANG: "tr" });
+    assert.equal(JSON.parse(await readFile(configPath, "utf8")).language, "en");
     await probe("/lang", "Language: en (English)");
   } finally {
     await rm(root, { recursive: true, force: true });

@@ -6,6 +6,7 @@ import { homedir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { deflateSync, inflateSync } from "node:zlib";
+import { terminalLink } from "./ansi.js";
 import {
   buildClipboardImageAttachment,
   readImageFromClipboard,
@@ -135,7 +136,7 @@ export const osc8FileLink = (
   if (!filePath) return label;
   try {
     const href = pathToFileURL(filePath).href;
-    return `\x1b]8;;${href}\x07${label}\x1b]8;;\x07`;
+    return terminalLink(label, href);
   } catch {
     return label;
   }

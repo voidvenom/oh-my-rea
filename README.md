@@ -112,7 +112,11 @@ Use `omr changelog` for the installed version, `omr changelog 0.5.1` for a speci
 
 ## Language
 
-Use `omr --lang tr` for Turkish or `omr --lang en` for English. In the TUI, `/lang` shows the active language and `/lang tr --save` switches and saves it. Startup uses the flag, then `OMR_LANG`, then the saved preference, then the terminal locale. JSONL events remain in English.
+Use `omr --lang tr` for Turkish or `omr --lang en` for English in the current launch. In the TUI, `/lang` shows the active language, and `/lang tr` or `/lang en` switches and saves it. Startup uses the flag, then `OMR_LANG`, then the saved preference, then the terminal locale. JSONL events remain in English.
+
+## Support
+
+If you’d like to support omr, you can buy the maintainer a coffee. [Buy Me a Coffee](https://buymeacoffee.com/omrdev)
 
 ## Requirements
 

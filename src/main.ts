@@ -3,6 +3,7 @@ import { LanguageArgumentError, MissingArgumentError, parseArgs, type LaunchOpti
 import { beginEarlyInput, releaseEarlyInput } from "./earlyInput.js";
 import { resolveReaEnv } from "./env.js";
 import { I18n } from "./i18n/index.js";
+import { SUPPORT_URL } from "./support.js";
 import { VERSION } from "./version.js";
 
 const main = async (): Promise<number> => {
@@ -29,7 +30,8 @@ const main = async (): Promise<number> => {
   if (opts.help) {
     const [{ helpText }, { modelConfigPath }, { SCHEMA_VERSION }] =
       await Promise.all([import("./commands.js"), import("./modelConfig.js"), import("./render.js"), languageReady()]);
-    process.stdout.write(`${t("cli.help", { version: VERSION, schema: SCHEMA_VERSION, config: modelConfigPath() })}\n\n${helpText([], i18n)}\n`);
+    const footer = opts.json ? "" : `\n${t("support.cta", { url: SUPPORT_URL })}\n`;
+    process.stdout.write(`${t("cli.help", { version: VERSION, schema: SCHEMA_VERSION, config: modelConfigPath() })}\n\n${helpText([], i18n)}\n${footer}`);
     return 0;
   }
 

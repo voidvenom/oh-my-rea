@@ -1,5 +1,6 @@
 import { open, stat } from "node:fs/promises";
 import {
+  centerAnsi,
   gradientText,
   padEndAnsi,
   truncateAnsi,
@@ -8,6 +9,7 @@ import {
 } from "./ansi.js";
 import { VERSION } from "./version.js";
 import type { I18n } from "./i18n/index.js";
+import { renderSupportLine } from "./support.js";
 
 export interface TargetMagic {
   readonly path: string;
@@ -395,14 +397,8 @@ export interface HeroRenderContext {
   readonly candidates: readonly string[];
   readonly sessionId: string;
   readonly theme: ColorTheme;
+  readonly hyperlinks?: boolean;
 }
-
-const centerLine = (content: string, width: number): string => {
-  const w = visibleWidth(content);
-  if (w >= width) return truncateAnsi(content, width);
-  const left = Math.floor((width - w) / 2);
-  return `${" ".repeat(left)}${content}`;
-};
 
 /**
  * Render the signature OMR Hero Screen with custom block logo, flanking live
@@ -416,7 +412,7 @@ export const renderHeroLines = (ctx: HeroRenderContext): string[] => {
   const lines: string[] = [];
   const effectiveTick = binaryEnabled ? tick : 0;
 
-  const compact = height < 18 || width < 52;
+  const compact = height < OMR_LOGO_FULL.length + 2 || width < 52;
   const logo = compact ? OMR_LOGO_COMPACT : OMR_LOGO_FULL;
   const logoWidth = compact ? 9 : 28;
   const sideGap = 3;
@@ -424,8 +420,14 @@ export const renderHeroLines = (ctx: HeroRenderContext): string[] => {
     26,
     Math.floor((width - logoWidth - sideGap * 2) / 2),
   );
+  const languageHint = t("hero.languageHint");
+  const switchCommands = "/lang en · /lang tr";
+  const guides = [
+    centerAnsi(renderSupportLine(width, ctx.i18n, theme, ctx.hyperlinks ?? true), width),
+    centerAnsi(`${theme.muted}${languageHint && visibleWidth(languageHint) <= width ? languageHint : switchCommands}${theme.reset}`, width),
+  ];
 
-  if (height >= 22) lines.push("");
+  if (height < logo.length + guides.length || width < logoWidth) return guides.slice(0, height);
 
   // 1. Logo flanked by flowing binary wings
   logo.forEach((logoRow, idx) => {
@@ -457,24 +459,25 @@ export const renderHeroLines = (ctx: HeroRenderContext): string[] => {
         1,
       );
       lines.push(
-        centerLine(
+        centerAnsi(
           `${leftWing}${" ".repeat(sideGap)}${coloredLogo}${" ".repeat(sideGap)}${rightWing}`,
           width,
         ),
       );
     } else {
-      lines.push(centerLine(coloredLogo, width));
+      lines.push(centerAnsi(coloredLogo, width));
     }
   });
+  lines.push(...guides);
 
   // 2. Subtitle / Brand line
   const subtitle = theme.enabled
     ? `${theme.neonMint}${theme.bold}OH-MY-REA${theme.reset} ${theme.subtle}v${VERSION}${theme.reset} ${theme.muted}· ${t("hero.subtitle")}${theme.reset}`
     : `OH-MY-REA v${VERSION} · ${t("hero.subtitle")}`;
-  lines.push(centerLine(subtitle, width));
+  if (lines.length < height) lines.push(centerAnsi(subtitle, width));
 
   // 3. Live Hex + Binary Disassembler Waterfall Strip
-  if (height >= 15 && width >= 44) {
+  if (height - lines.length >= 5 && height >= 15 && width >= 44) {
     lines.push("");
     const stripWidth = Math.min(width - 2, 74);
     const stream = ctx.i18n.upper(t("hero.stream"));
@@ -485,7 +488,7 @@ export const renderHeroLines = (ctx: HeroRenderContext): string[] => {
     const leftBar = "─".repeat(Math.floor(barFill / 2));
     const rightBar = "─".repeat(barFill - leftBar.length);
     lines.push(
-      centerLine(
+      centerAnsi(
         `${theme.border}╭${leftBar}${theme.reset}${theme.neonCyan}${streamLabel}${theme.reset}${theme.border}${rightBar}╮${theme.reset}`,
         width,
       ),
@@ -505,19 +508,20 @@ export const renderHeroLines = (ctx: HeroRenderContext): string[] => {
         stripWidth - 4,
       );
       lines.push(
-        centerLine(
+        centerAnsi(
           `${theme.border}│${theme.reset} ${inner} ${theme.border}│${theme.reset}`,
           width,
         ),
       );
     }
     lines.push(
-      centerLine(
+      centerAnsi(
         `${theme.border}╰${"─".repeat(stripWidth - 2)}╯${theme.reset}`,
         width,
       ),
     );
   }
+  if (height - lines.length < 2) return lines;
 
   // 4. Target + Engine Status Pill Row
   lines.push("");
@@ -537,10 +541,10 @@ export const renderHeroLines = (ctx: HeroRenderContext): string[] => {
   const shortModel = ctx.model === "no-model" || !ctx.model ? t("status.noModel") : ctx.model.split("/").at(-1) || ctx.model;
   const modelBadge = `${theme.violet}◆ ${shortModel}${theme.reset}`;
 
-  lines.push(centerLine(`${targetBadge}  ${reaBadge}  ${modelBadge}`, width));
+  lines.push(centerAnsi(`${targetBadge}  ${reaBadge}  ${modelBadge}`, width));
 
   // 5. Quick Forensic Workflows Grid
-  if (height >= 19 && width >= 54) {
+  if (height >= 19 && width >= 54 && height - lines.length >= 4) {
     lines.push("");
     const cardWidth = Math.min(width - 4, 70);
     const colW = Math.floor((cardWidth - 4) / 2);
@@ -558,7 +562,7 @@ export const renderHeroLines = (ctx: HeroRenderContext): string[] => {
         `${theme.neonCyan}${padEndAnsi(rightCmd, 15)}${theme.reset}${theme.muted}${rightDesc}${theme.reset}`,
         colW,
       );
-      return centerLine(`${leftCell}  ${rightCell}`, width);
+      return centerAnsi(`${leftCell}  ${rightCell}`, width);
     };
     lines.push(
       pair("/triage", t("hero.triage"), "/investigate", t("hero.investigate")),
@@ -574,7 +578,7 @@ export const renderHeroLines = (ctx: HeroRenderContext): string[] => {
     lines.push(
       pair("/find <text>", t("hero.find"), "/model", t("hero.model")),
     );
-    if (height >= 26) {
+    if (height >= 26 && lines.length < height) {
       lines.push(
         pair("/evidence", t("hero.evidence"), "/dashboard", t("hero.dashboard")),
       );

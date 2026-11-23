@@ -4,19 +4,25 @@ This project uses the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) f
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-23
+
 ### Added
 
+- A support link above the TUI prompt and below the startup logo, with clickable terminal links and plain-text fallback. The link is also in CLI help and the README.
+- A language switch hint on the startup screen.
 - `omr changelog [version|--all]` and a paged `/changelog` view read the packaged release history.
 - Interactive launches show a short release summary once per installed version. `omr update` shows it immediately when the newly installed package includes notes.
-- Turkish and English terminal interfaces. Select a language with `--lang`, `OMR_LANG`, or `/lang`, and use `/lang --save` to remember it.
+- Turkish and English terminal interfaces. Select a language with `--lang`, `OMR_LANG`, or `/lang`.
 
 ### Changed
 
+- `/lang en` and `/lang tr` switch immediately and save the selection. Startup overrides through `--lang` and `OMR_LANG` apply to the current launch.
 - Update notices show installed and available versions. They point to `/changelog` and `omr update`. The first launch with an empty cache primes it in the background, and the next launch can show the result.
 - npm packages include this changelog. The maintainer script requires a section for the version being released, and the GitHub Release uses that section as its notes.
 
 ### Fixed
 
+- The original startup logo stays visible alongside startup notices until the transcript starts.
 - A cooked Enter that reaches the TUI in its first input chunk submits a typed-ahead command.
 
 ## [0.6.0] - 2026-11-23

@@ -1146,10 +1146,10 @@ const LOCAL_COMMANDS: readonly Command[] = [
   {
     name: "lang",
     aliases: ["language"],
-    description: "Show or switch the interface language",
+    description: "Show or change the saved interface language",
     kind: "local",
     argument: "optional",
-    usage: "/lang [en|tr] [--save]",
+    usage: "/lang [en|tr]",
     requires: {},
     source: "builtin",
   },

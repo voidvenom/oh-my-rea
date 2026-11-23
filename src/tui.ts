@@ -3,6 +3,7 @@ import {
   ESC,
   SYNC_END,
   SYNC_START,
+  centerAnsi,
   codePointWidth,
   createTheme,
   highlightVisualCols,
@@ -52,6 +53,7 @@ import {
   type SavedSessionSummary,
 } from "./session.js";
 import { completePathInput } from "./target.js";
+import { renderSupportLine } from "./support.js";
 import { completeAtMention } from "./vision.js";
 
 export type BinaryFlowMode = "on" | "eco" | "busy" | "off";
@@ -450,6 +452,7 @@ const wrapComposerWithCursor = (
 
 export class TerminalUi {
   private readonly stdout = process.stdout;
+  private readonly hyperlinks = process.env["TERM"] !== "dumb";
   private readonly decoder = new StringDecoder("utf8");
   private readonly theme: ColorTheme;
   private readonly cwd: string;
@@ -3707,17 +3710,11 @@ export class TerminalUi {
         ? [this.renderStagedImagesStrip(cols)]
         : [];
 
+    const fixedRows = 3 + composerBoxRows + netGuardLines.length + steerLines.length + imageLines.length;
+    const supportRows = rows >= fixedRows + 3 ? 1 : 0;
+
     // 3. Optional overlay (Palette takes priority over Output Drawer)
-    // Reserve: 1 header + min 4 viewport body + 1 viewport bottom + netGuard + steer + images + composerBoxRows + 1 status
-    const maxOverlayBudget = Math.max(
-      0,
-      rows -
-        (composerBoxRows +
-          7 +
-          netGuardLines.length +
-          steerLines.length +
-          imageLines.length),
-    );
+    const maxOverlayBudget = Math.max(0, rows - fixedRows - supportRows - 4);
     const paletteItems = this.paletteOpen ? this.paletteItems() : [];
     let overlayLines: string[] = [];
     if (this.paletteOpen && maxOverlayBudget >= 3) {
@@ -3738,17 +3735,7 @@ export class TerminalUi {
     }
 
     // 4. Main viewport body height
-    const viewportBodyRows = Math.max(
-      2,
-      rows -
-        2 -
-        overlayLines.length -
-        netGuardLines.length -
-        steerLines.length -
-        imageLines.length -
-        composerBoxRows -
-        1,
-    );
+    const viewportBodyRows = Math.max(2, rows - fixedRows - supportRows - overlayLines.length);
 
     // Assemble frame top-to-bottom
     const frame: string[] = [];
@@ -3785,6 +3772,9 @@ export class TerminalUi {
     for (const line of netGuardLines) frame.push(line);
     for (const line of steerLines) frame.push(line);
     for (const line of imageLines) frame.push(line);
+    if (supportRows) {
+      frame.push(centerAnsi(renderSupportLine(cols - 2, this.i18n, t, this.hyperlinks), cols));
+    }
 
     // Composer box
     const composerTopRowIndex = frame.length; // 0-based
@@ -3807,7 +3797,9 @@ export class TerminalUi {
       this.renderBoxTop(
         cols,
         composerTitle,
-        composerRightHint,
+        supportRows ? composerRightHint : renderSupportLine(
+          cols - visibleWidth(composerTitle) - 9, this.i18n, t, this.hyperlinks,
+        ),
         composerFocusedBorder,
         t.neonCyan,
       ),
@@ -3973,11 +3965,14 @@ export class TerminalUi {
   }
 
   private renderViewportLeft(width: number, height: number): string[] {
-    if (this.timeline.length === 0) {
+    // Release notes and other startup messages stay visible without replacing the empty-session splash.
+    if (this.timeline.every((entry) => entry.kind === "system" && entry.startup)) {
+      const noticeBudget = Math.min(Math.floor(height / 3), Math.max(0, height - 8));
+      const notices = this.renderTimelineLines(width).slice(0, noticeBudget);
       const hero = renderHeroLines({
         i18n: this.i18n,
         width,
-        height,
+        height: height - notices.length,
         tick: this.tick,
         binaryEnabled: this.isFlowEnabled(),
         model: this.status.model,
@@ -3988,17 +3983,14 @@ export class TerminalUi {
         candidates: this.status.candidates,
         sessionId: this.status.session,
         theme: this.theme,
+        hyperlinks: this.hyperlinks,
       });
-      const shownHero =
-        hero.length < height
-          ? [
-              ...Array.from(
-                { length: Math.max(0, Math.floor((height - hero.length) / 2)) },
-                () => "",
-              ),
-              ...hero,
-            ].slice(0, height)
-          : hero.slice(0, height);
+      const topPadding = Math.max(0, Math.floor((height - hero.length - notices.length) / 2));
+      const shownHero = [
+        ...Array.from({ length: topPadding }, () => ""),
+        ...hero,
+        ...notices,
+      ];
       this.lastViewportLayout = {
         startLine: 0,
         height,
