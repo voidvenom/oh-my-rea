@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { padEndAnsi, stripAnsi, truncateAnsi, visibleWidth } from "../dist/ansi.js";
+import { changelogText, releaseSummary } from "../dist/changelog.js";
 import { COMMANDS } from "../dist/commands.js";
 import { en } from "../dist/i18n/en.js";
 import { tr } from "../dist/i18n/tr.js";
@@ -243,7 +244,9 @@ test("/lang repaints the running startup activity and startup notices in both di
       for (const text of [heading(before), footer(before), update(before), updateBody(before), bitstream(before, from)]) {
         assert.ok(!rendered.includes(text), rendered);
       }
-      assert.ok(frames.some((frame) => frame.includes("A language switch hint on the startup screen.")));
+      // The start of the packaged summary's first bullet (short enough not to wrap) reaches the screen.
+      const firstNote = releaseSummary(await changelogText(VERSION)).split("\n")[0].slice(2, 32);
+      assert.ok(firstNote.length > 10 && frames.some((frame) => frame.includes(firstNote)), firstNote);
     }
   } finally {
     await rm(root, { recursive: true, force: true });

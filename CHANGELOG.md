@@ -4,16 +4,19 @@ This project uses the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) f
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-23
+
 ### Added
 
-- Ctrl+click opens links in the TUI: URLs in answers, notices, drawers and the HUD (including URLs wrapped across lines), plus a plain click on the support link. Links are underlined in the link colour and still carry OSC 8 for terminals that open them natively. Only `http`, `https` and `mailto` URLs open, through `xdg-open`, `/usr/bin/open` or `rundll32 url.dll,FileProtocolHandler`, launched directly without a shell. A short status toast confirms the launch.
+- macOS and Windows support alongside Linux. It is verified with platform mocks and with Windows Node under Wine, but not yet exercised on native macOS or Windows hosts. The fixes below cover launching, storage, processes and desktop integration. See the README platform notes for terminal and provider caveats.
+- An amber box in the TUI announces available updates. It shows the new version in English or Turkish with the `omr update` command highlighted.
+- Ctrl+click opens links in the TUI. This covers URLs in answers, notices, drawers and the HUD (including URLs wrapped across lines), plus a plain click on the support link. Links are underlined in the link colour and still carry OSC 8 for terminals that open them natively. Only `http`, `https` and `mailto` URLs open, through `xdg-open`, `/usr/bin/open` or `rundll32 url.dll,FileProtocolHandler`, launched directly without a shell. A short status toast confirms the launch.
 - Double-click selects a word and triple-click selects a line in the TUI.
-- An amber **Update Available** box in the TUI (English and Turkish) shows the new version and the highlighted `omr update` command.
 
 ### Changed
 
 - Every interactive launch checks the registry in the background, after the first paint. The update box appears in the same session as soon as the registry answers, instead of on the next launch. A cached result shows at once and is updated in place. A minimum interval of 60 seconds between checks prevents bursts of launches from hammering the registry. The timeout is 3 seconds and failures are silent. `OMR_NO_UPDATE_CHECK=1` and CI still disable checks. The check honours `npm_config_registry`.
-- CI checks Linux, macOS and Windows across the supported Node lines, including installation and smoke tests from the npm tarball.
+- A CI matrix covers Linux, macOS and Windows on the supported Node lines, including installation and smoke tests from the npm tarball. It has not run yet; it runs once the branch is pushed.
 
 ### Fixed
 
