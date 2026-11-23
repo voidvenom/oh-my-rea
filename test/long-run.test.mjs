@@ -109,6 +109,26 @@ describe("a long turn survives context pressure", () => {
 });
 
 describe("tool failures and aborts", () => {
+  it("returns errors for empty and truncated tool arguments without dispatching them", async () => {
+    let round = 0;
+    const model = {
+      model: "fake",
+      async stream() {
+        round += 1;
+        return round <= 2
+          ? reply({ toolCalls: [toolCall(`c${round}`, "work", round === 1 ? "" : '{"value":')], finishReason: "tool_calls" })
+          : reply({ content: "recovered" });
+      },
+    };
+    const broker = { ...okBroker(), dispatch: async () => assert.fail("incomplete arguments were dispatched") };
+    const agent = new Agent(model, broker, { systemPrompt: "sys" });
+    const turn = await agent.run("go");
+    assert.equal(turn.status, "completed");
+    const results = agent.history.filter((message) => message.role === "tool");
+    assert.equal(results.length, 2);
+    for (const result of results) assert.match(result.content, /Invalid tool arguments JSON/);
+  });
+
   it("a tool whose outcome is uncertain or that throws is reported to the model; the turn continues", async () => {
     let n = 0;
     const model = { model: "fake", summarize: async () => "s", async stream() { n += 1; return n <= 3 ? reply({ toolCalls: [toolCall(`c${n}`, `t${n}`)], finishReason: "tool_calls" }) : reply({ content: "recovered" }); } };
@@ -176,6 +196,27 @@ describe("provider interruptions", () => {
       assert.equal(turn.status, "completed");
     });
     assert.equal(resolveModelConfig({ HOME: tmpdir(), OMR_PROVIDER: "custom", OMR_BASE_URL: "http://127.0.0.1:1", OMR_API_KEY: "x", OMR_MODEL: "m", OMR_TIMEOUT_MS: "0" }).config.timeoutMs, 0);
+  });
+
+  it("retries heartbeat-only streams and finishes at DONE before the server closes the connection", async () => {
+    let requests = 0;
+    await sseServer((round, res) => {
+      requests += 1;
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      if (round === 0) {
+        res.write(": keepalive\n\n");
+        const heartbeat = setInterval(() => res.write(": keepalive\n\n"), 50);
+        res.once("close", () => clearInterval(heartbeat));
+      } else {
+        res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: "ok" } }] })}\n\ndata: [DONE]\n\n`);
+      }
+    }, async (port) => {
+      const deadline = AbortSignal.timeout(5000);
+      const turn = await new Agent(clientAt(port, { timeoutMs: 1000 }), okBroker(), { systemPrompt: "sys" }).run("go", {}, deadline);
+      assert.equal(turn.status, "completed");
+      assert.equal(turn.text, "ok");
+      assert.equal(requests, 2);
+    });
   });
 
   it("aborts instantly while the model is still thinking", async () => {

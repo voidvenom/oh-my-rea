@@ -542,8 +542,8 @@ interface Watchdog {
 }
 
 /**
- * Inactivity watchdog: aborts only when no bytes arrive for `idleMs`, so long
- * high-effort reasoning streams are never cut off while they keep producing data.
+ * Inactivity watchdog: streamed reasoning and tool deltas count as progress.
+ * Transport heartbeats alone do not keep a stuck generation alive.
  */
 const createWatchdog = (idleMs: number, parent?: AbortSignal): Watchdog => {
   const controller = new AbortController();
@@ -551,7 +551,7 @@ const createWatchdog = (idleMs: number, parent?: AbortSignal): Watchdog => {
   const fire = (): void => {
     controller.abort(
       new ModelStallError(
-        `model stream stalled: no data received for ${Math.round(idleMs / 1000)}s (raise OMR_TIMEOUT_MS for slow models)`,
+        `model stream stalled: no response progress for ${Math.round(idleMs / 1000)}s (raise OMR_TIMEOUT_MS for slow models)`,
       ),
     );
   };
@@ -579,26 +579,27 @@ const createWatchdog = (idleMs: number, parent?: AbortSignal): Watchdog => {
 /** Read a Server-Sent Events body line by line, feeding each `data:` payload to `onData`. */
 const readSse = async (
   body: ReadableStream<Uint8Array>,
-  watchdog: Watchdog,
-  onData: (data: string) => void,
+  onData: (data: string) => boolean | void,
 ): Promise<void> => {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  const flushLine = (raw: string): void => {
+  const flushLine = (raw: string): boolean | void => {
     const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
-    if (line.startsWith("data:")) onData(line.slice(5).trim());
+    if (line.startsWith("data:")) return onData(line.slice(5).trim());
   };
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      watchdog.touch();
       buffer += decoder.decode(value, { stream: true });
       let start = 0;
       let newline = buffer.indexOf("\n", start);
       while (newline >= 0) {
-        flushLine(buffer.slice(start, newline));
+        if (flushLine(buffer.slice(start, newline))) {
+          void reader.cancel().catch(() => {});
+          return;
+        }
         start = newline + 1;
         newline = buffer.indexOf("\n", start);
       }
@@ -607,7 +608,7 @@ const readSse = async (
     buffer += decoder.decode();
     for (const tail of buffer.split("\n")) flushLine(tail);
   } catch (error) {
-    await reader.cancel().catch(() => {});
+    void reader.cancel().catch(() => {});
     throw error;
   } finally {
     reader.releaseLock();
@@ -661,7 +662,7 @@ const callsFromMessage = (message: unknown): ChatToolCall[] => {
       type: "function",
       function: {
         name,
-        arguments: asString(fn["arguments"], "{}"),
+        arguments: asString(fn["arguments"]),
       },
     });
   });
@@ -1644,11 +1645,11 @@ export class ModelClient implements ModelPort {
     };
 
     let sawDone = false;
-    await readSse(body, watchdog, (data) => {
+    await readSse(body, (data) => {
       if (!data) return;
       if (data === "[DONE]") {
         sawDone = true;
-        return;
+        return true;
       }
       let parsed: unknown;
       try {
@@ -1661,6 +1662,7 @@ export class ModelClient implements ModelPort {
       if (record["error"] && asArray(record["choices"]).length === 0) {
         throw streamError("model", record["error"]);
       }
+      if (record["usage"]) watchdog.touch();
       usage = usageOf(record["usage"]) ?? usage;
       for (const value of asArray(record["choices"])) {
         const choice = asRecord(value);
@@ -1669,6 +1671,7 @@ export class ModelClient implements ModelPort {
         if (delta) {
           const thought = reasoningTextOf(delta);
           if (thought.length > 0) {
+            watchdog.touch();
             reasoning += thought;
             if (typeof delta["reasoning_content"] === "string")
               fieldReasoning += thought;
@@ -1676,12 +1679,14 @@ export class ModelClient implements ModelPort {
           }
           const text = delta["content"];
           if (typeof text === "string" && text.length > 0) {
+            watchdog.touch();
             content += text;
             onText(text);
           }
           for (const rawCall of asArray(delta["tool_calls"])) {
             const call = asRecord(rawCall);
             if (!call) continue;
+            watchdog.touch();
             const slot = resolveCallSlot(call);
             const fn = asRecord(call["function"]);
             const current = calls.get(slot) ?? {
@@ -1700,8 +1705,10 @@ export class ModelClient implements ModelPort {
             calls.set(slot, current);
           }
         }
-        if (typeof choice["finish_reason"] === "string")
+        if (typeof choice["finish_reason"] === "string") {
           finishReason = choice["finish_reason"];
+          watchdog.touch();
+        }
       }
     });
 
@@ -1711,7 +1718,7 @@ export class ModelClient implements ModelPort {
       .map(([index, call]) => ({
         id: call.id || `call_${index}`,
         type: "function",
-        function: { name: call.name, arguments: call.arguments || "{}" },
+        function: { name: call.name, arguments: call.arguments },
       }));
 
     if (!finishReason && !sawDone) {
@@ -1887,11 +1894,11 @@ export class ModelClient implements ModelPort {
     };
 
     let sawMessageStop = false;
-    await readSse(response.body, watchdog, (data) => {
+    await readSse(response.body, (data) => {
       if (!data) return;
       if (data === "[DONE]") {
         sawMessageStop = true;
-        return;
+        return true;
       }
       let parsed: unknown;
       try {
@@ -1902,11 +1909,13 @@ export class ModelClient implements ModelPort {
       const event = asRecord(parsed);
       if (!event) return;
       const type = asString(event["type"]);
+      if (type && type !== "ping") watchdog.touch();
 
       if (type === "error") {
         throw streamError("Anthropic", event["error"]);
       } else if (type === "message_stop") {
         sawMessageStop = true;
+        return true;
       } else if (type === "message_start") {
         mergeUsage(asRecord(event["message"])?.["usage"]);
       } else if (type === "content_block_start") {

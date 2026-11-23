@@ -305,9 +305,17 @@ const THINKING_STAR_FRAMES = [
 ] as const;
 const IDLE_FLOW_GRACE_MS = 3_000;
 const FLOW_INTERVAL_MS = 105;
-const MAX_OUTPUT_CHARS = 256_000;
+const MAX_OUTPUT_CHARS = 64_000;
 const MAX_TIMELINE_ENTRIES = 600;
-const MAX_TIMELINE_CHARS = 1_500_000;
+const MAX_TIMELINE_CHARS = 240_000;
+const MAX_ENTRY_CHARS = 8_000;
+const MAX_TOOL_GROUP = 16;
+
+const timelineText = (text: string): string => {
+  if (text.length <= MAX_ENTRY_CHARS) return sanitizeText(text);
+  const slice = Math.floor(MAX_ENTRY_CHARS / 2) - 24;
+  return sanitizeText(`${text.slice(0, slice)}\n… [transcript preview] …\n${text.slice(-slice)}`);
+};
 const DOUBLE_ENTER_STEER_WINDOW_MS = 650;
 const PASTE_SAFETY_TIMEOUT_MS = 150;
 const MAX_STAGED_IMAGES = 6;
@@ -995,21 +1003,21 @@ export class TerminalUi {
   addUser(text: string): void {
     this.closeActiveStreams();
     this.outputDrawerOpen = false;
-    this.timeline.push({ kind: "user", text: sanitizeText(text), rev: 1 });
+    this.timeline.push({ kind: "user", text: timelineText(text), rev: 1 });
     this.trimTimeline();
     this.scroll = 0;
     this.paint();
   }
 
   addSystem(text: string): void {
-    this.timeline.push({ kind: "system", text: sanitizeText(text), rev: 1 });
+    this.timeline.push({ kind: "system", text: timelineText(text), rev: 1 });
     this.trimTimeline();
     this.scroll = 0;
     this.paint();
   }
 
   addError(text: string): void {
-    this.timeline.push({ kind: "error", text: sanitizeText(text), rev: 1 });
+    this.timeline.push({ kind: "error", text: timelineText(text), rev: 1 });
     this.trimTimeline();
     this.scroll = 0;
     this.paint();
@@ -1033,7 +1041,7 @@ export class TerminalUi {
     if (!clean) return;
     const chunkWords = clean.trim() ? clean.trim().split(/\s+/).length : 0;
     this.reasoningEntry.words += chunkWords;
-    this.reasoningEntry.text += clean;
+    this.reasoningEntry.text = timelineText(this.reasoningEntry.text + clean);
     this.reasoningEntry.rev += 1;
     this.scroll = 0;
     this.schedule();
@@ -1064,7 +1072,7 @@ export class TerminalUi {
       this.streamEndedWithCr && delta.startsWith("\n") ? delta.slice(1) : delta;
     this.streamEndedWithCr = delta.endsWith("\r");
     if (slice.length > 0) {
-      this.streamEntry.text += sanitizeText(slice);
+      this.streamEntry.text = timelineText(this.streamEntry.text + slice);
       this.streamEntry.rev += 1;
     }
     this.scroll = 0;
@@ -1077,7 +1085,7 @@ export class TerminalUi {
     if (!this.streamEntry && text.trim().length > 0) {
       this.timeline.push({
         kind: "assistant",
-        text: sanitizeText(text),
+        text: timelineText(text),
         streaming: false,
         meta: meta ?? null,
         rev: 1,
@@ -1090,7 +1098,7 @@ export class TerminalUi {
     this.streamEntry = null;
     if (!entry) return;
     entry.streaming = false;
-    if (text) entry.text = sanitizeText(text);
+    if (text) entry.text = timelineText(text);
     if (meta !== undefined) entry.meta = meta;
     entry.rev += 1;
     if (entry.text.trim().length === 0) {
@@ -1131,7 +1139,7 @@ export class TerminalUi {
       evidenceIds: [],
     };
     const last = this.timeline.at(-1);
-    if (last?.kind === "tools") {
+    if (last?.kind === "tools" && last.calls.length < MAX_TOOL_GROUP) {
       last.calls.push(item);
       last.rev += 1;
     } else {
@@ -1226,6 +1234,7 @@ export class TerminalUi {
     messages: readonly ChatMessage[],
     options?: { readonly bannerText?: string | undefined },
   ): void {
+    messages = messages.slice(-240);
     this.closeActiveStreams();
     this.outputDrawerOpen = false;
     this.outputExpanded = false;
@@ -1252,7 +1261,7 @@ export class TerminalUi {
       if (msg.role === "system" || msg.role === "tool") continue;
 
       if (msg.role === "user") {
-        const rawContent = typeof msg.content === "string" ? msg.content : "";
+        const rawContent = typeof msg.content === "string" ? timelineText(msg.content) : "";
         const cleaned = stripInternalPromptNotes(rawContent);
         if (!cleaned && (!msg.images || msg.images.length === 0)) continue;
 
@@ -1282,6 +1291,7 @@ export class TerminalUi {
         });
         if (cleaned && this.history.at(-1) !== cleaned) {
           this.history.push(cleaned);
+          if (this.history.length > 200) this.history.shift();
         }
         continue;
       }
@@ -1299,7 +1309,7 @@ export class TerminalUi {
           }
         }
         if (reasoningParts.length > 0) {
-          const thoughtText = sanitizeText(reasoningParts.join("\n\n"));
+          const thoughtText = timelineText(reasoningParts.join("\n\n"));
           const words = thoughtText
             .trim()
             .split(/\s+/)
@@ -1319,7 +1329,7 @@ export class TerminalUi {
         if (typeof msg.content === "string" && msg.content.trim().length > 0) {
           this.timeline.push({
             kind: "assistant",
-            text: sanitizeText(msg.content.replace(/^\n+/, "")),
+            text: timelineText(msg.content).replace(/^\n+/, ""),
             streaming: false,
             meta: null,
             rev: 1,
@@ -1370,16 +1380,14 @@ export class TerminalUi {
             });
           }
 
-          const prev = this.timeline.at(-1);
-          if (prev?.kind === "tools") {
-            prev.calls.push(...calls);
-            prev.rev += 1;
-          } else {
-            this.timeline.push({
-              kind: "tools",
-              calls,
-              rev: 1,
-            });
+          for (const call of calls) {
+            const prev = this.timeline.at(-1);
+            if (prev?.kind === "tools" && prev.calls.length < MAX_TOOL_GROUP) {
+              prev.calls.push(call);
+              prev.rev += 1;
+            } else {
+              this.timeline.push({ kind: "tools", calls: [call], rev: 1 });
+            }
           }
         }
       }
@@ -3490,7 +3498,7 @@ export class TerminalUi {
         : undefined;
 
     if (line) {
-      this.history.push(line);
+      this.history.push(timelineText(line));
       if (this.history.length > 200) this.history.shift();
     }
     this.historyIndex = -1;

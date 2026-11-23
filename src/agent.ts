@@ -391,14 +391,11 @@ export class Agent {
     const settings = this.settings();
     try { this.toolSchemaTokens = (this.model.capabilities ?? resolveModelCapabilities(this.model.model,this.model.providerId)).tools === false ? 0 : estimateToolTokens(this.broker.definitions(this.resolveToolContext())); }
     catch { /* A catalog refresh can temporarily withhold schemas; the last admitted estimate remains visible. */ }
-    const estimate = estimateTokens(this.historyChars()) + this.toolSchemaTokens + this.stepContextTokens;
+    const estimate = estimateRequestTokens(this.messages) + this.toolSchemaTokens + this.stepContextTokens;
     let tokens = estimate;
     let source: ContextUsage["source"] = "estimate";
     if (this.lastUsage && this.lastUsage.count <= this.messages.length) {
-      let after = 0;
-      for (let i = this.lastUsage.count; i < this.messages.length; i += 1)
-        after += messageChars(this.messages[i]!);
-      const reported = this.lastUsage.tokens + estimateTokens(after);
+      const reported = this.lastUsage.tokens + estimateRequestTokens(this.messages.slice(this.lastUsage.count));
       if (reported >= estimate) {
         tokens = reported;
         source = "provider";
@@ -632,42 +629,47 @@ export class Agent {
    * the newest exchange) until the request fits the window. Returns how many messages were dropped.
    */
   private trimToWindow(): number {
-    const fits = (): boolean => {
-      const usage = this.contextUsage();
-      return usage.tokens + (usage.outputReserveTokens ?? 0) <= usage.window;
-    };
-    // Earlier notes are folded into one so repeated trimming never accumulates note messages.
+    const usage = this.contextUsage();
+    const budget = usage.window - (usage.outputReserveTokens ?? 0);
+    if (usage.tokens <= budget) return 0;
+    const note = (count: number): ChatMessage => ({
+      role: "user",
+      content: `[omr] ${count} older tool-exchange messages were dropped to keep this long turn inside the model context window. Evidence (ev_ ids) and Unknowns remain in the session ledger; re-query anything you still need.`,
+    });
+    const costs = this.messages.map(message => estimateRequestTokens([message]));
+    let remaining = costs.reduce((total, cost) => total + cost, 0) + this.toolSchemaTokens + this.stepContextTokens;
+    const noteBudget = estimateRequestTokens([note(Number.MAX_SAFE_INTEGER)]);
+    const lastAssistant = this.messages.findLastIndex(message => message.role === "assistant");
+    const retained: ChatMessage[] = [];
     let carried = 0;
-    const isNote = (m: ChatMessage): boolean => m.role === "user" && typeof m.content === "string" && TRIM_NOTE.test(m.content);
-    const prune = (): void => {
-      for (let i = this.messages.length - 1; i >= 1; i -= 1) {
-        const m = this.messages[i]!;
-        if (isNote(m)) { carried += Number(TRIM_NOTE.exec(m.content as string)![1]); this.messages.splice(i, 1); }
-      }
-    };
     let dropped = 0;
     let firstDropAt = -1;
-    if (fits()) return 0;
-    prune();
-    while (!fits()) {
-      const groupStarts: number[] = [];
-      for (let i = 1; i < this.messages.length; i += 1) if (this.messages[i]!.role === "assistant") groupStarts.push(i);
-      if (groupStarts.length < 2) break;
-      const start = groupStarts[0]!;
-      let end = start + 1;
-      while (end < this.messages.length && this.messages[end]!.role === "tool") end += 1;
-      this.messages.splice(start, end - start);
-      dropped += end - start;
-      if (firstDropAt < 0) firstDropAt = start;
-      this.lastUsage = null;
+    for (let i = 0; i < this.messages.length; i += 1) {
+      const message = this.messages[i]!;
+      const prior = message.role === "user" && TRIM_NOTE.exec(message.content ?? "");
+      if (prior) {
+        carried += Number(prior[1]);
+        remaining -= costs[i]!;
+        continue;
+      }
+      if (remaining + noteBudget > budget && message.role === "assistant" && i < lastAssistant) {
+        if (firstDropAt < 0) firstDropAt = retained.length;
+        do {
+          remaining -= costs[i]!;
+          dropped += 1;
+          if (this.messages[i + 1]?.role !== "tool") break;
+          i += 1;
+        } while (i < this.messages.length);
+        continue;
+      }
+      retained.push(message);
     }
     if (dropped > 0 || carried > 0) {
-      const total = dropped + carried;
-      this.messages.splice(firstDropAt < 0 ? 1 : firstDropAt, 0, {
-        role: "user",
-        content: `[omr] ${total} older tool-exchange messages were dropped to keep this long turn inside the model context window. Evidence (ev_ ids) and Unknowns remain in the session ledger; re-query anything you still need.`,
-      });
+      retained.splice(firstDropAt < 0 ? 1 : firstDropAt, 0, note(dropped + carried));
+      this.messages.length = 0;
+      for (const message of retained) this.messages.push(message);
     }
+    this.lastUsage = null;
     return dropped;
   }
 
@@ -1359,7 +1361,7 @@ export class Agent {
         let args: Record<string, unknown> = {};
         let parseProblem: string | null = null;
         try {
-          const parsed: unknown = JSON.parse(call.function.arguments || "{}");
+          const parsed: unknown = JSON.parse(call.function.arguments);
           const record = asRecord(parsed);
           if (!record || Array.isArray(parsed)) parseProblem = "Tool arguments must be a JSON object.";
           else args = record;

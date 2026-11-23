@@ -55,17 +55,17 @@ const main = async (): Promise<number> => {
     return 0;
   }
 
+  const wantsTui = !opts.plain && !opts.json && !opts.command && !opts.goal && Boolean(process.stdin.isTTY && process.stdout.isTTY);
   const setup = await import("./setup.js");
   const stop = await setup.ensureRea();
   if (stop !== null) return stop;
-  if (!opts.json && process.stdout.isTTY) {
+  if (!wantsTui && !opts.json && process.stdout.isTTY) {
     const notice = setup.updateNotice();
     if (notice) process.stderr.write(`\x1b[2m${notice}\x1b[0m\n`);
   }
 
   // The interactive TUI will own the keyboard once it starts; capture keystrokes from now on so a command
   // typed while the runtime loads is replayed into it instead of arriving as a cooked `\n`.
-  const wantsTui = !opts.plain && !opts.json && !opts.command && !opts.goal && Boolean(process.stdin.isTTY && process.stdout.isTTY);
   if (wantsTui) beginEarlyInput();
   try {
     const { runOmr } = await import("./runtime.js");

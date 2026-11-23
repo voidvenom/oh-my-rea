@@ -3580,7 +3580,7 @@ describe("omr_run: verified script execution and CDP hardening", () => {
   });
 
   it("isolates the network by default and only reaches the host when asked", async (t) => {
-    if (!networkIsolationAvailable()) {
+    if (!(await networkIsolationAvailable())) {
       t.skip("unprivileged network namespaces are unavailable on this host");
       return;
     }

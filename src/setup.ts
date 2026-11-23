@@ -284,7 +284,7 @@ const printBox = (lines: readonly string[]): void => {
  */
 export const ensureRea = async (env: NodeJS.ProcessEnv = process.env): Promise<number | null> => {
   if (env["OMR_SKIP_SETUP"] === "1") return null;
-  if (detectRea(env).state === "ok") return null;
+  if (env["OMR_REA_COMMAND"] || siblingCheckout() || findOnPath("rea", env)) return null;
 
   const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
   if (!interactive) {
