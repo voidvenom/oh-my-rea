@@ -4,6 +4,10 @@ This project uses the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) f
 
 ## [Unreleased]
 
+### Fixed
+
+- Display release notes consistently when `CHANGELOG.md` uses Windows line endings.
+
 ## [0.8.0] - 2026-11-23
 
 ### Added
