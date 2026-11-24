@@ -4,8 +4,19 @@ This project uses the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) f
 
 ## [Unreleased]
 
+### Added
+
+- The model picker (`Alt+M`, `/model`) finds 9Router and OmniRoute running on this computer and lists their models. While the picker is open it checks `127.0.0.1` and `::1` on ports 20128, 20127 and 20129 without sending any API key, and labels a router only when the router's own identity endpoints answer. Models keep their exact IDs, so `9router:cx/model:thinking` works in `/model`, `fallback_models` and the saved default. Set `OMR_9ROUTER_BASE_URL` / `OMR_OMNIROUTE_BASE_URL` for other addresses, `OMR_9ROUTER_API_KEY` / `OMR_OMNIROUTE_API_KEY` for router keys, `OMR_ROUTER_PORTS` for other ports, or `OMR_ROUTER_DISCOVERY=0` to turn the check off.
+- A **Custom provider** entry at the top of the model picker connects any OpenAI-compatible endpoint. Enter the base URL and an optional API key (or `$ENV_NAME`), test the connection, then pick a model from the endpoint's list. A typed key stays in memory for the session and is sent only to that address; a key for a remote address is sent only after you confirm it. `Alt+S` saves the endpoint under `providers` in `omr-model.json`; a typed key is written only after a second `Alt+S`.
+- `/providers` reports `router` and `catalog_status` for each provider.
+
+### Changed
+
+- `/model endpoint <url>` reuses the active provider's API key only when the new address has the same origin; any other host is contacted without it.
+
 ### Fixed
 
+- Saving a named provider as the default no longer copies its URL to the top level of `omr-model.json`, where omr then treated it as a second custom endpoint and could send `OPENAI_API_KEY` to it. Configs written that way by earlier versions load without the duplicate. A saved default whose key variable is not set now fails with a clear message instead of switching to another endpoint.
 - Display release notes consistently when `CHANGELOG.md` uses Windows line endings.
 
 ## [0.8.0] - 2026-11-23
