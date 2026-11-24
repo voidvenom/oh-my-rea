@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, copyFile, cp, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, copyFile, cp, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -110,7 +110,8 @@ test("REA detection searches PATH instead of running rea, and updateNotice never
     const sibling = join(siblingScripts, "rea.mjs");
     await mkdir(siblingScripts, { recursive: true });
     await writeFile(sibling, 'console.log("rea 6.8.0");\n');
-    assert.deepEqual(resolveReaLauncher(env), { source: "checkout", path: sibling });
+    // Node resolves the fixture module's path before setting import.meta.url (e.g. macOS /var).
+    assert.deepEqual(resolveReaLauncher(env), { source: "checkout", path: join(await realpath(dir), "rea", "scripts", "rea.mjs") });
     assert.deepEqual(detectRea(env), { state: "ok", source: "checkout", version: null });
     assert.equal(await updateNotice(env), null, "the cached PATH version does not describe the checkout");
     const overridden = { ...env, OMR_REA_COMMAND: fake };
