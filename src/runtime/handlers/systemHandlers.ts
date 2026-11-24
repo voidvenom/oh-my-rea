@@ -823,7 +823,9 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
       mc.openInteractiveModelPicker(rest ? rest.trim().toLowerCase() : null);
       return;
     }
-    const refreshed = await mc.triggerProvidersRefresh(false);
+    await mc.triggerProvidersRefresh(false);
+    await mc.startRouterDiscovery(false);
+    const refreshed = mc.providers;
     const q = rest.trim().toLowerCase();
     const filtered = q
       ? refreshed.filter(
@@ -845,6 +847,8 @@ export const registerSystemHandlers = (registry: CommandRegistry): void => {
         key_source: p.keySource,
         env_hint: p.envHint,
         live_loaded: p.liveLoaded,
+        router: p.product ?? null,
+        catalog_status: p.catalogStatus ?? null,
         model_count: p.models.length,
         models: p.models.slice(0, 12).map((m) => m.id),
       })),

@@ -965,12 +965,18 @@ export class ModelController {
         : "") ||
       "OMR_API_KEY";
     let apiKeyEnv = existingEnvName;
-    let apiKey =
-      this.modelInfo?.config.apiKey ||
-      this.env[existingEnvName] ||
-      this.env["OMR_API_KEY"] ||
-      "";
-    let keySource = this.modelInfo?.keySource ?? `env ${apiKeyEnv}`;
+    // The active provider's key is inherited only for the very same origin; another host never receives it.
+    const sameOrigin = (() => {
+      try {
+        return new URL(this.modelInfo?.config.baseUrl ?? "").origin === new URL(baseUrl).origin;
+      } catch {
+        return false;
+      }
+    })();
+    let apiKey = sameOrigin
+      ? this.modelInfo?.config.apiKey || this.env[existingEnvName] || this.env["OMR_API_KEY"] || ""
+      : "";
+    let keySource = sameOrigin ? (this.modelInfo?.keySource ?? `env ${apiKeyEnv}`) : `env ${apiKeyEnv}`;
 
     if (keyOrEnv && keyOrEnv.trim()) {
       const trimmedKey = keyOrEnv.trim();
