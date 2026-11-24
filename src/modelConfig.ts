@@ -8,11 +8,13 @@ import {
 import { dirname } from "node:path";
 import { reaConfigPath } from "./platform.js";
 import { replaceFileSync } from "./platformFs.js";
+import { sameEndpoint } from "./customEndpoint.js";
 import {
   discoverProvidersSync,
   inferProtocolFromUrl,
   type ProviderProtocol,
   type ResolvedProvider,
+  type RouterProduct,
 } from "./providers.js";
 import { asNumber, asRecord, asString } from "./values.js";
 import type { CapabilityMetadata } from "./capabilities.js";
@@ -447,6 +449,11 @@ export const resolveModelConfig = (
     .toLowerCase();
   if (explicitProviderId) {
     const namedProv = providers.find((p) => p.id === explicitProviderId);
+    // A saved named provider whose key is missing must not fall through to the top-level endpoint: that would
+    // send its model ID to an unrelated server (and, in older files, with an unrelated key).
+    if (namedProv?.provenance === "config-named" && !namedProv.connected && !namedProv.local) {
+      throw new Error(`Provider "${namedProv.name}" is not connected. Export ${namedProv.envHint} first.`);
+    }
     if (
       namedProv &&
       (namedProv.connected || namedProv.local) &&
@@ -578,6 +585,99 @@ export const withReasoningEffort = (
   },
 });
 
+/** Backs up an existing config, then writes `next` through a staging file with owner-only permissions. */
+const writeConfigAtomically = (path: string, next: Record<string, unknown>): string | null => {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  let backupPath: string | null = null;
+  if (existsSync(path)) {
+    backupPath = `${path}.bak`;
+    copyFileSync(path, backupPath);
+  }
+  // Write-then-rename so a crash mid-write can never leave a truncated config behind.
+  const staging = `${path}.${process.pid}.tmp`;
+  writeFileSync(staging, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+  replaceFileSync(staging, path);
+  return backupPath;
+};
+
+const isRouterProduct = (value: unknown): value is RouterProduct => value === "9router" || value === "omniroute";
+
+/** Stored `providers` entry for an id, matched like discovery does (trimmed, case-insensitive). */
+const findStoredProviderKey = (providers: Record<string, unknown> | null, id: string): string | null => {
+  if (!providers) return null;
+  return Object.keys(providers).find((key) => key.trim().toLowerCase() === id.toLowerCase() && asRecord(providers[key])) ?? null;
+};
+
+export type ProviderKeySpec =
+  | { readonly kind: "keep" }
+  | { readonly kind: "none" }
+  | { readonly kind: "env"; readonly name: string }
+  | { readonly kind: "literal"; readonly value: string };
+
+export interface NamedProviderEntry {
+  readonly name: string;
+  readonly baseUrl: string;
+  readonly protocol: ProviderProtocol;
+  readonly router?: RouterProduct | undefined;
+  readonly key: ProviderKeySpec;
+}
+
+/**
+ * Additive save of `providers.<id>` plus the default selection. Never writes a top-level `base_url`,
+ * `api_key_env`, `api_key` or `protocol`, so a named provider cannot be rebuilt as a second "custom" endpoint.
+ */
+export const saveNamedProviderDefault = (
+  providerId: string,
+  entry: NamedProviderEntry,
+  info: ModelConfigInfo,
+  env: NodeJS.ProcessEnv = process.env,
+): { path: string; backupPath: string | null } => {
+  const path = modelConfigPath(env);
+  const existing = readStoredModelConfig(env) ?? {};
+  const providers = { ...(asRecord(existing["providers"]) ?? {}) };
+  const storedKey = findStoredProviderKey(providers, providerId) ?? providerId;
+  const next: Record<string, unknown> = { ...existing };
+  // Files written by older versions copied the provider's URL to the top level; drop that duplicate.
+  const topUrl = asString(existing["base_url"]);
+  if (topUrl && sameEndpoint(topUrl, entry.baseUrl)) {
+    for (const key of ["base_url", "protocol", "api_key_env", "api_key"]) delete next[key];
+  }
+  const saved: Record<string, unknown> = {
+    ...(asRecord(providers[storedKey]) ?? {}),
+    name: entry.name,
+    base_url: entry.baseUrl,
+    protocol: entry.protocol,
+    model: info.config.model,
+  };
+  if (entry.router) saved["router"] = entry.router;
+  switch (entry.key.kind) {
+    case "env":
+      saved["api_key_env"] = entry.key.name;
+      delete saved["api_key"];
+      break;
+    case "literal":
+      saved["api_key"] = entry.key.value;
+      delete saved["api_key_env"];
+      break;
+    case "none":
+      delete saved["api_key"];
+      delete saved["api_key_env"];
+      break;
+    case "keep":
+      break;
+  }
+  providers[storedKey] = saved;
+  next["provider"] = providerId;
+  next["model"] = info.config.model;
+  next["reasoning_effort"] = info.config.reasoningEffort ?? "auto";
+  next["max_tokens"] = info.config.maxTokens;
+  next["providers"] = providers;
+  // Only an explicit step cap is persisted; unlimited (0) must also clear a legacy stored default.
+  if (info.config.maxSteps > 0) next["max_steps"] = info.config.maxSteps;
+  else delete next["max_steps"];
+  return { path, backupPath: writeConfigAtomically(path, next) };
+};
+
 /**
  * Additively persist default provider & model to `~/.config/rea/omr-model.json`
  * with an automatic `.bak` backup if the file already exists. Never writes raw
@@ -589,17 +689,30 @@ export const saveDefaultModelConfig = (
 ): { path: string; backupPath: string | null } => {
   const path = modelConfigPath(env);
   const existing = readStoredModelConfig(env) ?? {};
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-
-  let backupPath: string | null = null;
-  if (existsSync(path)) {
-    backupPath = `${path}.bak`;
-    copyFileSync(path, backupPath);
+  const providerId = info.config.providerId ?? "custom";
+  // A provider that lives under `providers` is saved there; copying its URL to the top level would make the
+  // next start rebuild it as a second, "custom" endpoint.
+  const providers = asRecord(existing["providers"]);
+  const storedKey = providerId === "custom" ? null : findStoredProviderKey(providers, providerId);
+  if (storedKey) {
+    const stored = asRecord(providers?.[storedKey])!;
+    return saveNamedProviderDefault(
+      providerId,
+      {
+        name: asString(stored["name"]).trim() || info.config.providerName || providerId,
+        baseUrl: asString(stored["base_url"]).trim() || info.config.baseUrl,
+        protocol: info.config.protocol ?? "openai-chat",
+        ...(isRouterProduct(stored["router"]) ? { router: stored["router"] } : {}),
+        key: { kind: "keep" },
+      },
+      info,
+      env,
+    );
   }
 
   const next: Record<string, unknown> = {
     ...existing,
-    provider: info.config.providerId ?? "custom",
+    provider: providerId,
     protocol: info.config.protocol ?? "openai-chat",
     base_url: info.config.baseUrl,
     model: info.config.model,
@@ -610,11 +723,7 @@ export const saveDefaultModelConfig = (
   // Only an explicit step cap is persisted; unlimited (0) must also clear a legacy stored default.
   if (info.config.maxSteps > 0) next["max_steps"] = info.config.maxSteps;
   else delete next["max_steps"];
-  // Write-then-rename so a crash mid-write can never leave a truncated config behind.
-  const staging = `${path}.${process.pid}.tmp`;
-  writeFileSync(staging, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
-  replaceFileSync(staging, path);
-  return { path, backupPath };
+  return { path, backupPath: writeConfigAtomically(path, next) };
 };
 
 /**

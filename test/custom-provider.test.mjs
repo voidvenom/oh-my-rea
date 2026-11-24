@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { COMMANDS } from "../dist/commands.js";
 import { createTheme, stripAnsi, visibleWidth } from "../dist/ansi.js";
 import { DEFAULT_COMPACTION_SETTINGS } from "../dist/compaction.js";
 import { I18n } from "../dist/i18n/index.js";
+import { infoFromProvider, modelConfigPath, readStoredModelConfig, resolveModelConfig, saveDefaultModelConfig, splitProviderModelSpec } from "../dist/modelConfig.js";
+import { discoverProvidersSync } from "../dist/providers.js";
 import { ModelController } from "../dist/runtime/modelController.js";
 import { OutputSink } from "../dist/runtime/output.js";
 import { TerminalUi } from "../dist/tui.js";
@@ -310,3 +312,203 @@ test("wizard frames fit 54/80/120 columns in both languages", async () => {
 function ui_assert_no_secret(ui) {
   for (const [cols, rows] of SIZES) assert.equal(frame(ui, cols, rows).includes("sk-width-secret"), false);
 }
+
+// ── Persistence, config and failover (P4) ────────────────────────────────────
+
+const writeConfig = (env, value) => {
+  const path = modelConfigPath(env);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(value));
+  return path;
+};
+const readConfig = (env) => JSON.parse(readFileSync(modelConfigPath(env), "utf8"));
+const routerEnv = (port, extra = {}) => ({ XDG_CONFIG_HOME: tempDir(), OMR_ROUTER_DISCOVERY: "1", OMR_ROUTER_PORTS: String(port), ...extra });
+const quietEnv = (env) => ({ XDG_CONFIG_HOME: env.XDG_CONFIG_HOME, OMR_ROUTER_DISCOVERY: "0" });
+
+test("saving a detected router writes a named entry and resolves on a fresh start", async () => {
+  const nine = await serve(nineRouterRoutes());
+  const env = routerEnv(nine.port);
+  const seed = { language: "tr", fallback_models: ["openai:gpt-4o"] };
+  const path = writeConfig(env, seed);
+  const { controller } = await setup({ env });
+  await controller.startRouterDiscovery(false);
+  const saved = await controller.applyModelSelection("9router", "cx/m:thinking", true, "auto");
+  assert.equal(saved.savedPath, path);
+  const config = readConfig(env);
+  assert.equal(config.provider, "9router");
+  assert.equal(config.model, "cx/m:thinking");
+  assert.deepEqual(config.providers["9router"], { name: "9Router", base_url: `${nine.origin}/v1`, protocol: "openai-chat", router: "9router", model: "cx/m:thinking" });
+  for (const key of ["base_url", "api_key_env", "api_key", "protocol"]) assert.equal(config[key], undefined, key);
+  assert.equal(config.language, "tr");
+  assert.deepEqual(config.fallback_models, ["openai:gpt-4o"]);
+  assert.deepEqual(JSON.parse(readFileSync(saved.backupPath, "utf8")), seed);
+  if (process.platform !== "win32") assert.equal(statSync(path).mode & 0o777, 0o600);
+  const fresh = quietEnv(env);
+  const info = resolveModelConfig(fresh);
+  assert.equal(info.config.providerId, "9router");
+  assert.equal(info.config.model, "cx/m:thinking");
+  assert.equal(info.config.baseUrl, `${nine.origin}/v1`);
+  assert.deepEqual(splitProviderModelSpec("9router:cx/m:thinking", discoverProvidersSync(fresh, readStoredModelConfig(fresh))), { providerId: "9router", modelId: "cx/m:thinking" });
+  // The saved router keeps its catalog in this session and is no longer an overlay.
+  const provider = controller.providers.find((p) => p.id === "9router");
+  assert.equal(provider.provenance, "config-named");
+  assert.equal(provider.models.length, 3);
+});
+
+test("the router key env name is saved, never its value", async () => {
+  const nine = await serve(nineRouterRoutes({ requireKey: "k9-secret" }));
+  const env = routerEnv(nine.port, { OMR_9ROUTER_API_KEY: "k9-secret" });
+  const { controller } = await setup({ env });
+  await controller.startRouterDiscovery(false);
+  assert.equal(controller.providers.find((p) => p.id === "9router").catalogStatus, "ok");
+  await controller.applyModelSelection("9router", "cx/example-model", true, "auto");
+  const config = readConfig(env);
+  assert.equal(config.providers["9router"].api_key_env, "OMR_9ROUTER_API_KEY");
+  assert.equal(config.providers["9router"].api_key, undefined);
+  assert.equal(readFileSync(modelConfigPath(env), "utf8").includes("k9-secret"), false);
+});
+
+test("a typed literal key is saved only after the second Alt+S", async () => {
+  const typedKey = "sk-typed-secret-1";
+  const fake = await serve(genericOpenAiRoutes());
+  const env = { XDG_CONFIG_HOME: tempDir(), OMR_ROUTER_DISCOVERY: "0", MY_ENV_KEY: "env-secret-2" };
+  const seed = { language: "en" };
+  writeConfig(env, seed);
+  const { ui, controller, selected } = await setup({ env });
+  const connect = async (keyText) => {
+    toCustomTab(ui);
+    enter(ui);
+    type(ui, `${fake.origin}/v1`);
+    enter(ui);
+    type(ui, keyText);
+    enter(ui);
+    await waitFor(() => wizard(ui) === null, "connected");
+    return currentTab(ui).id;
+  };
+  const id = await connect(typedKey);
+  assert.match(id, /^custom-127-0-0-1-\d+$/);
+  const frames = [];
+  ui.handleKey("\x1bs");
+  frames.push(frame(ui));
+  assert.match(frames[0], /Press Alt\+S again/);
+  assert.equal(selected.length, 0);
+  assert.equal(ui.picker.stage, "model");
+  // Something else in between disarms the confirmation.
+  ui.handleKey("\x1b[B");
+  ui.handleKey("\x1bs");
+  assert.equal(ui.picker.stage, "model");
+  assert.match(frame(ui), /Press Alt\+S again/);
+  ui.handleKey("\x1bs");
+  assert.equal(ui.picker.stage, "effort");
+  enter(ui);
+  assert.equal(selected.length, 1);
+  assert.deepEqual([selected[0][0], selected[0][2], selected[0][3]], [id, "auto", true]);
+  // Without the picker's confirmation the controller refuses to write the key.
+  await assert.rejects(controller.applyModelSelection(id, selected[0][1], true, "auto"), /key typed in this session/);
+  const saved = await controller.applyModelSelection(id, selected[0][1], true, "auto", { confirmedLiteralKey: true });
+  const config = readConfig(env);
+  assert.equal(config.providers[id].api_key, typedKey);
+  assert.equal(config.providers[id].api_key_env, undefined);
+  assert.equal(config.base_url, undefined);
+  assert.equal(readFileSync(saved.backupPath, "utf8").includes(typedKey), false);
+  for (const text of frames) assert.equal(text.includes(typedKey), false);
+});
+
+test("an env-reference wizard provider saves api_key_env with no confirmation", async () => {
+  const fake = await serve(genericOpenAiRoutes());
+  const env = { XDG_CONFIG_HOME: tempDir(), OMR_ROUTER_DISCOVERY: "0", MY_ENV_KEY: "env-secret-2" };
+  const { ui, controller, selected, open } = await setup({ env });
+  open();
+  toCustomTab(ui);
+  enter(ui);
+  type(ui, `${fake.origin}/v1`);
+  enter(ui);
+  type(ui, "$MY_ENV_KEY");
+  enter(ui);
+  await waitFor(() => wizard(ui) === null, "connected");
+  const id = currentTab(ui).id;
+  ui.handleKey("\x1bs");
+  assert.equal(ui.picker.stage, "effort");
+  enter(ui);
+  assert.equal(selected.length, 1);
+  await controller.applyModelSelection(id, selected[0][1], true, "auto");
+  const config = readConfig(env);
+  assert.equal(config.providers[id].api_key_env, "MY_ENV_KEY");
+  assert.equal(config.providers[id].api_key, undefined);
+  assert.equal(readFileSync(modelConfigPath(env), "utf8").includes("env-secret-2"), false);
+});
+
+test("saveDefaultModelConfig on a manually configured named provider keeps the top level clean", async () => {
+  const env = { XDG_CONFIG_HOME: tempDir(), OMR_ROUTER_DISCOVERY: "0" };
+  writeConfig(env, { providers: { foo: { base_url: "http://127.0.0.1:9/v1", api_key_env: "FOO_KEY" } } });
+  const stored = readStoredModelConfig(env);
+  const foo = discoverProvidersSync(env, stored).find((p) => p.id === "foo");
+  saveDefaultModelConfig(infoFromProvider(foo, "m-1", env, stored), env);
+  const config = readConfig(env);
+  assert.equal(config.provider, "foo");
+  assert.equal(config.model, "m-1");
+  assert.equal(config.base_url, undefined);
+  assert.equal(config.api_key_env, undefined);
+  assert.equal(config.providers.foo.api_key_env, "FOO_KEY");
+  assert.equal(config.providers.foo.base_url, "http://127.0.0.1:9/v1");
+  const { controller } = await setup({ env });
+  await controller.applyModelSelection("foo", "m-2", true, "auto");
+  assert.equal(readConfig(env).base_url, undefined);
+  assert.equal(readConfig(env).providers.foo.api_key_env, "FOO_KEY");
+});
+
+test("saving over a config an older version wrote repairs the duplicate top-level endpoint", async () => {
+  const nine = await serve(nineRouterRoutes());
+  const env = routerEnv(nine.port, { OPENAI_API_KEY: "sk-leak" });
+  const url = `${nine.origin}/v1`;
+  writeConfig(env, { provider: "9router", model: "cx/example-model", base_url: url, protocol: "openai-chat", api_key_env: "OPENAI_API_KEY", providers: { "9router": { name: "9Router", base_url: url, router: "9router" } } });
+  const { controller } = await setup({ env });
+  assert.equal(controller.providers.some((p) => p.id === "custom"), false);
+  await controller.startRouterDiscovery(false);
+  await controller.applyModelSelection("9router", "cx/example-model", true, "auto");
+  const config = readConfig(env);
+  for (const key of ["base_url", "api_key_env", "protocol"]) assert.equal(config[key], undefined, key);
+  assert.equal(nine.requests.some((request) => JSON.stringify(request.headers).includes("sk-leak")), false);
+});
+
+test("a disconnected named default fails clearly instead of switching endpoints", () => {
+  const env = { XDG_CONFIG_HOME: tempDir(), OMR_ROUTER_DISCOVERY: "0", OPENAI_API_KEY: "sk-x" };
+  writeConfig(env, { provider: "remote", model: "m", providers: { remote: { base_url: "https://r.example/v1", api_key_env: "R_KEY" } } });
+  assert.throws(() => resolveModelConfig(env), /not connected.*R_KEY/);
+  assert.equal(resolveModelConfig({ ...env, R_KEY: "set" }).config.providerId, "remote");
+});
+
+test("failover chains resolve router specs with colons", async () => {
+  const nine = await serve(nineRouterRoutes());
+  const env = { XDG_CONFIG_HOME: tempDir(), OMR_ROUTER_DISCOVERY: "0", OPENAI_API_KEY: "fake", OMR_MODEL: "gpt-4.1" };
+  writeConfig(env, {
+    provider: "openai",
+    fallback_models: ["9router:auto/coding:fast"],
+    providers: { "9router": { name: "9Router", base_url: `${nine.origin}/v1`, protocol: "openai-chat", router: "9router" } },
+  });
+  const created = [];
+  const output = new OutputSink({ json: true, writeStdout: () => {}, writeStderr: () => {} });
+  const controller = new ModelController(env, false, null, output, {
+    getCompactionSettings: () => DEFAULT_COMPACTION_SETTINGS, setCompactionSettings: () => {}, onModelUpdated: async () => {},
+  }, (config) => {
+    created.push(config);
+    return { model: config.model, stream: async () => ({ content: "", reasoning: "", toolCalls: [], finishReason: "stop", usage: null, reasoningContent: null, thinkingBlocks: [] }), summarize: async () => "" };
+  });
+  controller.buildActiveClient();
+  const fallback = created.find((config) => config.providerId === "9router");
+  assert.equal(fallback.model, "auto/coding:fast");
+  assert.equal(fallback.baseUrl, `${nine.origin}/v1`);
+});
+
+test("saving a failover or compaction spec for an unsaved session provider is refused", async () => {
+  const fake = await serve(genericOpenAiRoutes());
+  const env = { XDG_CONFIG_HOME: tempDir(), OMR_ROUTER_DISCOVERY: "0" };
+  const { controller } = await setup({ env });
+  const result = await controller.testCustomEndpoint({ rawUrl: `${fake.origin}/v1`, key: { kind: "none" }, targetProviderId: null }, new AbortController().signal);
+  assert.equal(result.status, "ok");
+  const spec = `${result.providerId}:cx/example-model`;
+  await assert.rejects(controller.applyFallbackModels([spec], true), /save the provider first/i);
+  assert.deepEqual((await controller.applyFallbackModels([spec], false)).specs, [spec]);
+  assert.throws(() => controller.applyCompactionModelSelection(spec, true), /save the provider first/i);
+  assert.equal(existsSync(modelConfigPath(env)), false);
+});

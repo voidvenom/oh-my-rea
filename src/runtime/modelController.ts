@@ -14,6 +14,7 @@ import {
   readStoredModelConfig,
   resolveModelConfig,
   saveDefaultModelConfig,
+  saveNamedProviderDefault,
   saveReasoningEffortDefault,
   saveModelRuntimeSettings,
   splitProviderModelSpec,
@@ -21,6 +22,8 @@ import {
   withReasoningEffort,
   type ModelConfig,
   type ModelConfigInfo,
+  type NamedProviderEntry,
+  type ProviderKeySpec,
   type ReasoningEffort,
 } from "../modelConfig.js";
 import {
@@ -38,6 +41,7 @@ import {
   fetchProviderModels,
   inferProtocolFromUrl,
   refreshAllProviders,
+  ROUTER_PRODUCTS,
   type ResolvedProvider,
 } from "../providers.js";
 import { resolveLimits } from "../modelLimits.js";
@@ -348,11 +352,24 @@ export class ModelController {
     return client;
   }
 
+  /** A provider that exists only in this session cannot be named in a saved fallback or compaction model. */
+  private assertSavedProviders(specs: readonly string[]): void {
+    for (const spec of specs) {
+      const parsed = splitProviderModelSpec(spec, this.providers);
+      if (!parsed.providerId) continue;
+      const sessionOnly = this.overlays.has(parsed.providerId) && !this.baseProviders.some((provider) => provider.id === parsed.providerId);
+      if (sessionOnly) {
+        throw new Error(`Save the provider first: "${parsed.providerId}" exists only in this session (select one of its models and press Alt+S).`);
+      }
+    }
+  }
+
   async applyFallbackModels(
     specs: readonly string[],
     saveDefault: boolean,
   ): Promise<{ specs: readonly string[]; savedPath: string | null }> {
     const cleaned = specs.map((s) => s.trim()).filter(Boolean);
+    if (saveDefault) this.assertSavedProviders(cleaned);
     if (this.modelInfo) {
       this.modelInfo = {
         ...this.modelInfo,
@@ -757,6 +774,7 @@ export class ModelController {
     const normalizedSpec = normalizeCompactionModelSpec(spec);
     if (normalizedSpec) {
       this.resolveCompactionModelClient(normalizedSpec);
+      if (saveDefault) this.assertSavedProviders([normalizedSpec]);
     }
     const next: CompactionSettings = {
       ...this.callbacks.getCompactionSettings(),
@@ -776,9 +794,11 @@ export class ModelController {
     nextModelId: string,
     saveDefault: boolean,
     explicitEffort?: ReasoningEffort,
+    options: { readonly confirmedLiteralKey?: boolean } = {},
   ): Promise<{ savedPath: string | null; backupPath: string | null }> {
     const cleanModel = nextModelId.trim();
     if (!cleanModel) throw new Error("Model ID cannot be empty.");
+    if (saveDefault && explicitProviderId) this.assertKeySaveConfirmed(explicitProviderId.toLowerCase(), options.confirmedLiteralKey === true);
     const previousEffort = this.modelInfo?.config.reasoningEffort ?? "auto";
 
     if (explicitProviderId) {
@@ -856,15 +876,71 @@ export class ModelController {
     let savedPath: string | null = null;
     let backupPath: string | null = null;
     if (saveDefault) {
-      const saved = saveDefaultModelConfig(this.modelInfo, this.env);
+      const saved = this.saveSelection(this.modelInfo);
       savedPath = saved.path;
       backupPath = saved.backupPath;
-      this.storedModelConfig = readStoredModelConfig(this.env);
-      this.syncDiscoveredProviders();
     } else if (explicitEffort !== undefined) {
       this.rememberEffort(explicitEffort);
     }
     return { savedPath, backupPath };
+  }
+
+  /** A key typed in the picker reaches disk only when the picker's double Alt+S confirmed it. */
+  private assertKeySaveConfirmed(providerId: string, confirmed: boolean): void {
+    if (confirmed) return;
+    if (this.sessionKeys.get(providerId)?.kind === "literal" && this.overlays.has(providerId)) {
+      throw new Error("This provider uses a key typed in this session. Select it in the model picker and press Alt+S twice to store the key, or enter $ENV_NAME as the key.");
+    }
+  }
+
+  /** The named-provider entry to persist for a detected, session or env-configured provider (never a key value from env). */
+  private namedEntryFor(provider: ResolvedProvider): NamedProviderEntry | null {
+    if (provider.provenance !== "detected" && provider.provenance !== "session" && provider.provenance !== "env-router") return null;
+    const typed = this.sessionKeys.get(provider.id);
+    let key: ProviderKeySpec = { kind: "none" };
+    if (typed?.kind === "literal") key = { kind: "literal", value: typed.value };
+    else if (typed?.kind === "env") key = { kind: "env", name: typed.name };
+    else if (provider.product && this.env[ROUTER_PRODUCTS[provider.product].apiKeyEnv]?.trim()) {
+      key = { kind: "env", name: ROUTER_PRODUCTS[provider.product].apiKeyEnv };
+    }
+    return {
+      name: provider.name,
+      baseUrl: provider.baseUrl,
+      protocol: provider.protocol,
+      ...(provider.product ? { router: provider.product } : {}),
+      key,
+    };
+  }
+
+  private saveSelection(info: ModelConfigInfo): { path: string; backupPath: string | null } {
+    const provider = this.providers.find((candidate) => candidate.id === info.config.providerId);
+    const entry = provider ? this.namedEntryFor(provider) : null;
+    let saved: { path: string; backupPath: string | null };
+    if (provider && entry) {
+      saved = saveNamedProviderDefault(provider.id, entry, info, this.env);
+    } else {
+      saved = saveDefaultModelConfig(info, this.env);
+    }
+    this.storedModelConfig = readStoredModelConfig(this.env);
+    if (provider && entry) {
+      // The config entry now owns this id; keep the catalog that was already loaded.
+      const overlay = this.overlays.get(provider.id);
+      this.overlays.delete(provider.id);
+      this.sessionKeys.delete(provider.id);
+      this.syncDiscoveredProviders();
+      if (overlay) {
+        this.updateProvider(provider.id, (candidate) => ({
+          ...candidate,
+          models: overlay.models.length > 0 ? overlay.models : candidate.models,
+          liveLoaded: true,
+          ...(overlay.catalogStatus ? { catalogStatus: overlay.catalogStatus } : {}),
+          ...(overlay.httpStatus !== undefined ? { httpStatus: overlay.httpStatus } : {}),
+        }));
+      }
+    } else {
+      this.syncDiscoveredProviders();
+    }
+    return saved;
   }
 
   async configureCustomEndpoint(
@@ -998,6 +1074,7 @@ export class ModelController {
   applyEffortSelection(
     effort: ReasoningEffort,
     saveDefault: boolean,
+    options: { readonly confirmedLiteralKey?: boolean } = {},
   ): { savedPath: string | null; backupPath: string | null } {
     if (this.noModel) {
       throw new Error(
@@ -1006,6 +1083,9 @@ export class ModelController {
     }
     if (!this.modelInfo) {
       this.modelInfo = resolveModelConfig(this.env, this.initialModelFlag);
+    }
+    if (saveDefault && this.modelInfo.config.providerId) {
+      this.assertKeySaveConfirmed(this.modelInfo.config.providerId, options.confirmedLiteralKey === true);
     }
     this.modelInfo = withReasoningEffort(this.modelInfo, effort);
     this.modelError = null;
@@ -1020,11 +1100,9 @@ export class ModelController {
     let savedPath: string | null = null;
     let backupPath: string | null = null;
     if (saveDefault) {
-      const saved = saveDefaultModelConfig(this.modelInfo, this.env);
+      const saved = this.saveSelection(this.modelInfo);
       savedPath = saved.path;
       backupPath = saved.backupPath;
-      this.storedModelConfig = readStoredModelConfig(this.env);
-      this.syncDiscoveredProviders();
     }
     return { savedPath, backupPath };
   }

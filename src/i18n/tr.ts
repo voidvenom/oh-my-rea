@@ -478,6 +478,7 @@ Eklemek için \`.omr/commands/<name>.md\` oluşturun veya \`/save --as-command <
   "picker.custom.keyLabel": "Anahtar",
   "picker.custom.keyPrompt": "API anahtarı ya da ortamdan okumak için $ORTAM_ADI · atlamak için Enter",
   "picker.custom.keys": "Enter ileri · Esc geri · Ctrl+U temizle",
+  "picker.custom.saveKeyConfirm": "Kaydetmek API anahtarını da omr-model.json dosyasına (yalnızca sahibi okuyabilir) yazar. Onaylamak için Alt+S'ye yeniden basın.",
   "picker.custom.stepKey": "Özel sağlayıcı · 2/3 API anahtarı (isteğe bağlı)",
   "picker.custom.stepTest": "Özel sağlayıcı · 3/3 Bağlantıyı sına",
   "picker.custom.stepUrl": "Özel sağlayıcı · 1/3 API temel adresi",

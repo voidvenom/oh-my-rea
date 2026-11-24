@@ -298,7 +298,7 @@ export const runOmr = async (
       },
       onSelectModel: (providerId, nextModel, effort, saveDefault) => {
         void ctx?.modelController
-          .applyModelSelection(providerId, nextModel, saveDefault, effort)
+          .applyModelSelection(providerId, nextModel, saveDefault, effort, { confirmedLiteralKey: true })
           .then(({ savedPath }) => {
             const effTag = effort !== "auto" ? i18n.t("launch.thinkingTag", { effort }) : "";
             ui.addSystem(
@@ -320,6 +320,7 @@ export const runOmr = async (
           const { savedPath } = ctx.modelController.applyEffortSelection(
             effort,
             saveDefault,
+            { confirmedLiteralKey: true },
           );
           if (!savedPath) ctx.modelController.rememberEffort(effort);
           ui.addSystem(

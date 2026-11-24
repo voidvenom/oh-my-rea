@@ -59,6 +59,7 @@ import {
   type ReasoningEffort,
 } from "./modelConfig.js";
 import {
+  SESSION_KEY_SOURCE,
   parseKeyInput,
   validateCustomBaseUrl,
   type CustomEndpointRequest,
@@ -335,6 +336,8 @@ interface ModelPickerState {
   /** A local router scan is running. */
   scanning: boolean;
   wizard: CustomWizardState | null;
+  /** Provider whose typed key the user was asked to confirm writing to disk (first Alt+S). */
+  saveKeyArmedFor: string | null;
   notice: string | LocalizedMessage | null;
 }
 
@@ -603,6 +606,7 @@ export class TerminalUi {
     loading: false,
     scanning: false,
     wizard: null,
+    saveKeyArmedFor: null,
     notice: null,
   };
   private wizardGeneration = 0;
@@ -3190,6 +3194,7 @@ export class TerminalUi {
   private handlePickerPlain(text: string): void {
     const clean = sanitizeText(text).replace(/[\r\n\t]+/g, "");
     if (!clean) return;
+    this.picker.saveKeyArmedFor = null;
     if (this.picker.stage === "effort") {
       for (const ch of clean) {
         const digit = Number(ch);
@@ -3214,7 +3219,23 @@ export class TerminalUi {
     this.paint();
   }
 
+  /**
+   * Saving a provider whose key was typed in this session writes that key to omr-model.json, so the first
+   * Alt+S/Ctrl+S only asks; a second one (with nothing pressed in between) confirms.
+   */
+  private confirmKeySave(provider: ResolvedProvider | undefined): boolean {
+    if (!provider || provider.keySource !== SESSION_KEY_SOURCE || this.picker.saveKeyArmedFor === provider.id) {
+      this.picker.saveKeyArmedFor = null;
+      return true;
+    }
+    this.picker.saveKeyArmedFor = provider.id;
+    this.picker.notice = (t) => t("picker.custom.saveKeyConfirm");
+    this.paint();
+    return false;
+  }
+
   private handlePickerKey(sequence: string): void {
+    if (sequence !== "\x13" && sequence !== "\x1bs") this.picker.saveKeyArmedFor = null;
     if (this.picker.stage === "effort") {
       const count = REASONING_EFFORT_LEVELS.length;
       switch (sequence) {
@@ -3462,6 +3483,7 @@ export class TerminalUi {
       this.paint();
       return;
     }
+    if (saveDefault && !this.confirmKeySave(selected.provider)) return;
     // Step 2 (omp-style): reveal bottom Thinking / Reasoning Effort selector before applying!
     this.picker.pendingProviderId = selected.provider.id;
     this.picker.pendingModelId = selected.modelId;
@@ -3480,6 +3502,10 @@ export class TerminalUi {
     const effortOnly = this.picker.effortOnly;
     const provId = this.picker.pendingProviderId;
     const modId = this.picker.pendingModelId;
+    if (saveDefault && !this.picker.pendingSaveDefault) {
+      const owner = effortOnly ? this.picker.activeProviderId : provId;
+      if (!this.confirmKeySave(this.picker.providers.find((p) => p.id === owner))) return;
+    }
 
     this.picker.open = false;
     this.picker.stage = "model";
@@ -5934,8 +5960,12 @@ export class TerminalUi {
             `${t.borderActive}│${t.reset} ${padEndAnsi(pillsLine, innerW)} ${t.borderActive}│${t.reset}`,
           );
         } else {
-          const info1 =
-            `${t.neonMint}${t.bold}◈ ${this.i18n.upper(this.i18n.t("picker.thinkingTitle"))}${t.reset} ${t.muted}${this.i18n.t("picker.for")}${t.reset} ` +
+          const effortNotice = this.picker.notice
+            ? typeof this.picker.notice === "function" ? this.picker.notice(this.i18n.t) : this.picker.notice
+            : null;
+          const info1 = effortNotice
+            ? `${t.amber}◈ ${effortNotice}${t.reset}`
+            : `${t.neonMint}${t.bold}◈ ${this.i18n.upper(this.i18n.t("picker.thinkingTitle"))}${t.reset} ${t.muted}${this.i18n.t("picker.for")}${t.reset} ` +
             `${t.violet}${t.bold}◆ ${targetSpec}${t.reset}${saveBadge}` +
             `${t.muted} · ←/→ or 1-7 · ${backHint}${t.reset}`;
           lines.push(

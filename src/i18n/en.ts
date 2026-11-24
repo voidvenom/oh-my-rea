@@ -476,6 +476,7 @@ Create \`.omr/commands/<name>.md\` or run \`/save --as-command <name> <prompt>\`
   "picker.custom.keyLabel": "Key",
   "picker.custom.keyPrompt": "API key, or $ENV_NAME to read it from the environment · Enter to skip",
   "picker.custom.keys": "Enter next · Esc back · Ctrl+U clear",
+  "picker.custom.saveKeyConfirm": "Saving also stores the API key in omr-model.json (owner-only file). Press Alt+S again to confirm.",
   "picker.custom.stepKey": "Custom provider · 2/3 API key (optional)",
   "picker.custom.stepTest": "Custom provider · 3/3 Test connection",
   "picker.custom.stepUrl": "Custom provider · 1/3 API base URL",
