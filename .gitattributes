@@ -1,0 +1,2 @@
+# Keep text checkouts identical across platforms; leave binary fixtures untouched.
+* text=auto eol=lf
