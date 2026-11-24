@@ -30,6 +30,8 @@ try {
     TMPDIR: root,
     TMP: root,
     TEMP: root,
+    // Keep unit tests away from any real 9Router/OmniRoute on the host; tests that need discovery set their own ports.
+    OMR_ROUTER_DISCOVERY: "0",
     DOCKER_HOST: process.platform === "win32" ? "npipe:////./pipe/omr-unit-no-docker" : `unix://${join(root, "docker.sock")}`,
     PATH: (process.platform === "win32"
       ? [dirname(process.execPath), join(process.env.SystemRoot ?? "C:\\Windows", "System32")]

@@ -25,6 +25,16 @@ export interface ProviderCatalogSpec {
   readonly resolveBaseUrl?: (env: NodeJS.ProcessEnv) => string | null;
 }
 
+export type RouterProduct = "9router" | "omniroute";
+export const ROUTER_PRODUCTS: Readonly<Record<RouterProduct, { readonly name: string; readonly baseUrlEnv: string; readonly apiKeyEnv: string }>> = {
+  "9router": { name: "9Router", baseUrlEnv: "OMR_9ROUTER_BASE_URL", apiKeyEnv: "OMR_9ROUTER_API_KEY" },
+  omniroute: { name: "OmniRoute", baseUrlEnv: "OMR_OMNIROUTE_BASE_URL", apiKeyEnv: "OMR_OMNIROUTE_API_KEY" },
+};
+export type CatalogStatus =
+  | "loading" | "ok" | "partial" | "empty" | "auth-required" | "denied" | "api-not-found"
+  | "malformed" | "too-large" | "redirect" | "timeout" | "unreachable" | "http-error" | "offline";
+export type ProviderProvenance = "builtin" | "config" | "config-named" | "env-router" | "detected" | "session";
+
 export interface ResolvedProvider {
   readonly id: string;
   readonly name: string;
@@ -40,6 +50,10 @@ export interface ResolvedProvider {
   readonly models: readonly ProviderModelItem[];
   readonly liveLoaded: boolean;
   readonly error: string | null;
+  readonly provenance?: ProviderProvenance;
+  readonly product?: RouterProduct;
+  readonly catalogStatus?: CatalogStatus;
+  readonly httpStatus?: number;
 }
 
 export const BUILTIN_PROVIDERS: readonly ProviderCatalogSpec[] = Object.freeze([
@@ -524,7 +538,7 @@ export const BUILTIN_PROVIDERS: readonly ProviderCatalogSpec[] = Object.freeze([
   },
 ]);
 
-const normalizeUrl = (url: string): string =>
+export const normalizeBaseUrl = (url: string): string =>
   url
     .trim()
     .replace(/\/+$/, "")
@@ -626,7 +640,7 @@ const formatModelCapabilitiesNote = (
   return parts.length > 0 ? parts.join(" · ") : undefined;
 };
 
-const buildModelItems = (
+export const buildModelItems = (
   configuredIds: readonly string[],
   liveEntries: readonly RawModelEntry[],
   curatedIds: readonly string[],
@@ -679,7 +693,7 @@ export const discoverProvidersSync = (
   storedConfig: Record<string, unknown> | null = null,
 ): ResolvedProvider[] => {
   const results: ResolvedProvider[] = [];
-  const customBaseUrl = normalizeUrl(
+  const customBaseUrl = normalizeBaseUrl(
     env["OMR_BASE_URL"] ?? asString(storedConfig?.["base_url"]),
   );
   const customModel = (
@@ -708,7 +722,7 @@ export const discoverProvidersSync = (
   const matchedBuiltin = customBaseUrl
     ? BUILTIN_PROVIDERS.find((spec) => {
         if (customProviderId && customProviderId === spec.id) return true;
-        const specUrl = normalizeUrl(
+        const specUrl = normalizeBaseUrl(
           spec.resolveBaseUrl?.(env) ??
             (spec.baseUrlEnv
               ? (env[spec.baseUrlEnv] ?? spec.defaultBaseUrl)
@@ -770,7 +784,7 @@ export const discoverProvidersSync = (
         continue;
       const entry = asRecord(rawEntry);
       if (!entry) continue;
-      const bUrl = normalizeUrl(asString(entry["base_url"]));
+      const bUrl = normalizeBaseUrl(asString(entry["base_url"]));
       if (!bUrl) continue;
       const kEnv = asString(entry["api_key_env"]).trim();
       const dKey = (
@@ -822,7 +836,7 @@ export const discoverProvidersSync = (
       (spec.baseUrlEnv && env[spec.baseUrlEnv]?.trim()
         ? env[spec.baseUrlEnv]!
         : spec.defaultBaseUrl);
-    const baseUrl = normalizeUrl(rawUrl ?? "");
+    const baseUrl = normalizeBaseUrl(rawUrl ?? "");
 
     let foundEnv = "";
     let apiKey = "";
@@ -911,7 +925,7 @@ const isChatCandidateModelId = (
 };
 
 const candidateOpenAiModelUrls = (baseUrl: string): string[] => {
-  const clean = normalizeUrl(baseUrl);
+  const clean = normalizeBaseUrl(baseUrl);
   const urls: string[] = [`${clean}/models`];
   if (!/\/v\d+(?:beta)?$/i.test(clean)) {
     urls.push(`${clean}/v1/models`);
@@ -926,9 +940,30 @@ const candidateOpenAiModelUrls = (baseUrl: string): string[] => {
   return [...new Set(urls)];
 };
 
-const extractLiveModelsFromPayload = (
+const NON_CHAT_KINDS: ReadonlySet<string> = new Set([
+  "embedding", "embeddings", "image", "images", "image-generation", "audio", "speech",
+  "tts", "stt", "transcription", "rerank", "moderation", "video",
+]);
+// C0/C1/DEL controls and bidi controls must never reach the screen or a request.
+// eslint-disable-next-line no-control-regex
+const UNSAFE_MODEL_TEXT = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/;
+const UNSAFE_MODEL_TEXT_GLOBAL = new RegExp(UNSAFE_MODEL_TEXT.source, "g");
+const CONTEXT_KEYS = ["context_length", "context_window", "contextWindow", "max_model_len"] as const;
+
+/** B5 R2: accept an advertised limit only when it is plausible; otherwise drop both limits. */
+const sanitizeAdvertisedLimits = (capabilities: CapabilityMetadata): { readonly capabilities: CapabilityMetadata; readonly dropped: boolean } => {
+  const { contextWindow, maxOutputTokens } = capabilities;
+  const plausibleWindow = contextWindow === undefined || (contextWindow >= 1024 && contextWindow <= 100_000_000);
+  const plausibleOutput = typeof maxOutputTokens !== "number" || contextWindow === undefined || maxOutputTokens < contextWindow;
+  if (plausibleWindow && plausibleOutput) return { capabilities, dropped: false };
+  const { contextWindow: _window, maxOutputTokens: _output, ...rest } = capabilities;
+  return { capabilities: rest, dropped: true };
+};
+
+export const extractLiveModelsFromPayload = (
   providerId: string,
   parsed: unknown,
+  options: { readonly kindAware?: boolean } = {},
 ): RawModelEntry[] => {
   const rec = asRecord(parsed);
   const rawList = Array.isArray(parsed)
@@ -939,9 +974,11 @@ const extractLiveModelsFromPayload = (
           asRecord(rec?.["result"])?.["models"] ??
           asRecord(rec?.["result"])?.["data"],
       );
+  const kindAware = options.kindAware === true;
   const out: RawModelEntry[] = [];
   for (const item of rawList) {
     if (typeof item === "string") {
+      if (kindAware && (item !== item.trim() || item.length > 256 || UNSAFE_MODEL_TEXT.test(item))) continue;
       const id = item.trim();
       if (id && isChatCandidateModelId(providerId, id)) {
         out.push(id);
@@ -950,12 +987,32 @@ const extractLiveModelsFromPayload = (
     }
     const obj = asRecord(item);
     if (!obj) continue;
-    const rawId = asString(obj["id"] ?? obj["name"] ?? obj["model"]).trim();
+    const rawId = asString(obj["id"] ?? obj["name"] ?? obj["model"]);
     const id =
-      providerId === "gemini" ? rawId.replace(/^models\//, "") : rawId;
-    if (!id || !isChatCandidateModelId(providerId, id)) continue;
-    const note = formatModelCapabilitiesNote(obj);
-    const capabilities = parseCapabilityMetadata(obj);
+      providerId === "gemini" ? rawId.trim().replace(/^models\//, "") : kindAware ? rawId : rawId.trim();
+    if (!id) continue;
+    if (kindAware) {
+      if (id !== id.trim() || id.length > 256 || UNSAFE_MODEL_TEXT.test(id)) continue;
+      const kind = asString(obj["kind"] ?? obj["type"]).trim().toLowerCase();
+      if (kind ? NON_CHAT_KINDS.has(kind) : !isChatCandidateModelId(providerId, id)) continue;
+    } else if (!isChatCandidateModelId(providerId, id)) {
+      continue;
+    }
+    let source: Record<string, unknown> = obj;
+    let capabilities = parseCapabilityMetadata(obj);
+    if (kindAware) {
+      const checked = sanitizeAdvertisedLimits(capabilities);
+      capabilities = checked.capabilities;
+      if (checked.dropped) {
+        const stripped: Record<string, unknown> = { ...obj };
+        for (const key of CONTEXT_KEYS) delete stripped[key];
+        const caps = asRecord(stripped["capabilities"]);
+        if (caps) stripped["capabilities"] = { ...caps, contextWindow: undefined, context_length: undefined };
+        source = stripped;
+      }
+    }
+    let note = formatModelCapabilitiesNote(source);
+    if (kindAware && note) note = note.replace(UNSAFE_MODEL_TEXT_GLOBAL, "");
     out.push(note || Object.keys(capabilities).length ? {id, ...(note ? {note} : {}), ...(Object.keys(capabilities).length ? {capabilities} : {})} : id);
   }
   return out;
