@@ -291,6 +291,9 @@ export const runOmr = async (
       onOpenCompactionModelPicker: () => {
         ctx?.modelController.openInteractiveCompactionModelPicker();
       },
+      onModelPickerClosed: () => {
+        ctx?.modelController.cancelRouterDiscovery();
+      },
       onSelectModel: (providerId, nextModel, effort, saveDefault) => {
         void ctx?.modelController
           .applyModelSelection(providerId, nextModel, saveDefault, effort)

@@ -35,6 +35,8 @@ export interface RouterCandidate {
   readonly origin: string;
   readonly apiBase: string;
   readonly explicit?: RouterProduct;
+  /** Key for a saved router provider; its own bound key, never one from another provider. */
+  readonly apiKey?: string;
 }
 
 const truthyEnv = (value: string | undefined): boolean => value !== undefined && /^(?:1|true|yes|on)$/i.test(value.trim());
@@ -269,8 +271,8 @@ export const discoverLocalRouters = async (options: DiscoverOptions): Promise<re
     if (!signal.aborted) options.onRouter?.(router);
   };
 
-  const catalogFor = async (product: RouterProduct, apiBase: string): Promise<CatalogResult> => {
-    const key = routerKey(product, env);
+  const catalogFor = async (product: RouterProduct, apiBase: string, ownKey: string | undefined): Promise<CatalogResult> => {
+    const key = ownKey ?? routerKey(product, env);
     const cacheKey = `${product}|${apiBase}|${keyId(key)}`;
     const cached = options.cache?.get(cacheKey);
     if (cached && !options.force && now() - cached.at < DISCOVERY_LIMITS.catalogTtlMs) return cached.result;
@@ -300,7 +302,7 @@ export const discoverLocalRouters = async (options: DiscoverOptions): Promise<re
     };
     winners.set(product, { index, router: loading });
     emit(loading);
-    const catalog = await catalogFor(product, candidate.apiBase);
+    const catalog = await catalogFor(product, candidate.apiBase, candidate.apiKey);
     const latest = winners.get(product);
     if (signal.aborted || !latest || latest.index !== index) return;
     const done: DiscoveredRouter = { ...loading, catalog };

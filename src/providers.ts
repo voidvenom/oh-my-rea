@@ -1,5 +1,6 @@
 import { asArray, asRecord, asString } from "./values.js";
 import { parseCapabilityMetadata, type CapabilityMetadata } from "./capabilities.js";
+import { sameEndpoint, validateCustomBaseUrl } from "./customEndpoint.js";
 
 export type ProviderProtocol = "openai-chat" | "anthropic-messages";
 
@@ -684,6 +685,15 @@ const looksLikeInlineApiKey = (val: string): boolean => {
   return !/^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed) && trimmed.length >= 12;
 };
 
+const routerProductOf = (value: unknown): RouterProduct | null =>
+  value === "9router" || value === "omniroute" ? value : null;
+
+const findNamedEntry = (entries: Record<string, unknown> | null, id: string): unknown => {
+  if (!entries) return undefined;
+  for (const [rawId, entry] of Object.entries(entries)) if (rawId.trim().toLowerCase() === id) return entry;
+  return undefined;
+};
+
 /**
  * Pure synchronous provider discovery (< 0.3ms, zero network I/O, zero secret exposure).
  * Combines `omr-model.json` custom profiles, `OMR_*` overrides, and all 33 built-in providers.
@@ -735,8 +745,21 @@ export const discoverProvidersSync = (
       })
     : undefined;
 
+  // Older versions copied a saved named provider's URL to the top level; that copy must not become a
+  // second "custom" provider (its key would fall back to OPENAI_API_KEY).
+  const namedProviderEntries = asRecord(storedConfig?.["providers"]);
+  const namedDuplicate = Boolean(
+    customBaseUrl &&
+      customProviderId &&
+      customProviderId !== "custom" &&
+      sameEndpoint(
+        customBaseUrl,
+        asString(asRecord(findNamedEntry(namedProviderEntries, customProviderId))?.["base_url"]),
+      ),
+  );
+
   // 1. Dedicated custom endpoint from omr-model.json / OMR_BASE_URL (if not already a built-in)
-  if (customBaseUrl && !matchedBuiltin) {
+  if (customBaseUrl && !matchedBuiltin && !namedDuplicate) {
     const localCustom = isLoopbackUrl(customBaseUrl);
     const resolvedKey =
       customDirectKey || customNamedKey || env["OPENAI_API_KEY"] || "";
@@ -772,6 +795,7 @@ export const discoverProvidersSync = (
       models: buildModelItems(configuredModels, [], []),
       liveLoaded: false,
       error: null,
+      provenance: "config",
     });
   }
 
@@ -825,8 +849,37 @@ export const discoverProvidersSync = (
         ),
         liveLoaded: false,
         error: null,
+        provenance: "config-named",
+        ...(routerProductOf(entry["router"]) ? { product: routerProductOf(entry["router"])! } : {}),
       });
     }
+  }
+
+  // 2b. Routers the user configured through OMR_9ROUTER_BASE_URL / OMR_OMNIROUTE_BASE_URL.
+  for (const [product, spec] of Object.entries(ROUTER_PRODUCTS) as Array<[RouterProduct, (typeof ROUTER_PRODUCTS)[RouterProduct]]>) {
+    const rawUrl = env[spec.baseUrlEnv]?.trim();
+    if (!rawUrl || results.some((p) => p.id === product)) continue;
+    const checked = validateCustomBaseUrl(rawUrl);
+    if (!checked.ok) continue;
+    const key = env[spec.apiKeyEnv]?.trim() ?? "";
+    results.push({
+      id: product,
+      name: spec.name,
+      protocol: "openai-chat",
+      baseUrl: checked.value.baseUrl,
+      connected: true,
+      local: checked.value.loopback,
+      apiKey: key,
+      apiKeyEnv: spec.apiKeyEnv,
+      keySource: key ? `env ${spec.apiKeyEnv}` : checked.value.loopback ? "local (no key)" : "missing",
+      envHint: spec.apiKeyEnv,
+      headers: {},
+      models: [],
+      liveLoaded: false,
+      error: null,
+      provenance: "env-router",
+      product,
+    });
   }
 
   // 3. Built-in providers (33 cloud, router, regional & local servers)
@@ -895,6 +948,7 @@ export const discoverProvidersSync = (
       models: buildModelItems(configuredForThis, [], spec.curatedModels),
       liveLoaded: false,
       error: null,
+      provenance: "builtin",
     });
   }
 

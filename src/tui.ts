@@ -58,7 +58,7 @@ import {
   REASONING_EFFORT_LEVELS,
   type ReasoningEffort,
 } from "./modelConfig.js";
-import type { ResolvedProvider } from "./providers.js";
+import { ROUTER_PRODUCTS, type ResolvedProvider } from "./providers.js";
 import {
   stripInternalPromptNotes,
   type SavedSessionSummary,
@@ -163,6 +163,8 @@ export interface UiOptions {
   onOpenModelPicker?: (focusProviderId?: string | null) => void;
   onOpenEffortPicker?: () => void;
   onOpenCompactionModelPicker?: () => void;
+  /** The model picker closed (selection, Esc or another surface); background scans can stop. */
+  onModelPickerClosed?: () => void;
   onSelectModel?: (
     providerId: string,
     modelId: string,
@@ -265,6 +267,7 @@ interface PaletteItem {
 }
 
 interface PickerTab {
+  readonly kind: "all" | "provider";
   readonly id: string;
   readonly label: string;
   readonly connected: boolean;
@@ -304,6 +307,8 @@ interface ModelPickerState {
   selectedRow: number;
   query: string;
   loading: boolean;
+  /** A local router scan is running. */
+  scanning: boolean;
   notice: string | LocalizedMessage | null;
 }
 
@@ -322,6 +327,14 @@ export interface RenderedFrame {
     readonly visible: boolean;
   };
 }
+
+const originOf = (baseUrl: string): string => {
+  try {
+    return new URL(baseUrl).origin;
+  } catch {
+    return baseUrl;
+  }
+};
 
 const SPINNER_FRAMES = [
   "⠋",
@@ -562,6 +575,7 @@ export class TerminalUi {
     selectedRow: 0,
     query: "",
     loading: false,
+    scanning: false,
     notice: null,
   };
 
@@ -681,6 +695,7 @@ export class TerminalUi {
     this.picker.selectedEffortIndex = effortIdx;
     this.picker.query = "";
     this.picker.loading = loading;
+    this.picker.scanning = false;
     this.picker.notice = null;
     this.paletteOpen = false;
     this.outputExpanded = false;
@@ -719,6 +734,7 @@ export class TerminalUi {
     this.picker.pendingSaveDefault = false;
     this.picker.query = "";
     this.picker.loading = loading;
+    this.picker.scanning = false;
     this.picker.notice = (t) => t("picker.compactionHelp");
     this.paletteOpen = false;
     this.outputExpanded = false;
@@ -754,6 +770,8 @@ export class TerminalUi {
     activeProviderId?: string | null;
     activeModelId?: string;
     loading?: boolean;
+    scanning?: boolean;
+    focusProviderId?: string;
     notice?: string | null;
   }): void {
     const prevTabs = this.pickerTabs();
@@ -765,13 +783,16 @@ export class TerminalUi {
     if (patch.activeModelId !== undefined)
       this.picker.activeModelId = patch.activeModelId;
     if (patch.loading !== undefined) this.picker.loading = patch.loading;
+    if (patch.scanning !== undefined) this.picker.scanning = patch.scanning;
     if (patch.notice !== undefined) this.picker.notice = patch.notice;
 
-    if (prevTabId) {
+    const focusId = patch.focusProviderId ?? prevTabId;
+    if (focusId) {
       const nextTabs = this.pickerTabs();
-      const idx = nextTabs.findIndex((t) => t.id === prevTabId);
+      const idx = nextTabs.findIndex((t) => t.id === focusId);
       if (idx >= 0) this.picker.selectedTab = idx;
     }
+    if (patch.scanning !== undefined) this.syncFlowTimer();
     const rows = this.pickerRows();
     if (this.picker.selectedRow >= rows.length) {
       this.picker.selectedRow = Math.max(0, rows.length - 1);
@@ -783,6 +804,8 @@ export class TerminalUi {
     if (!this.picker.open) return;
     this.picker.open = false;
     this.picker.loading = false;
+    this.picker.scanning = false;
+    this.options.onModelPickerClosed?.();
     this.syncFlowTimer();
     this.paint();
   }
@@ -792,7 +815,9 @@ export class TerminalUi {
   }
 
   openSessionPicker(sessions: readonly SavedSessionSummary[]): void {
+    if (this.picker.open) this.options.onModelPickerClosed?.();
     this.picker.open = false;
+    this.picker.scanning = false;
     this.paletteOpen = false;
     this.outputExpanded = false;
     this.outputDrawerOpen = false;
@@ -1555,7 +1580,7 @@ export class TerminalUi {
     if (this.networkGuard !== null && this.networkGuard.state !== "restored") {
       return true;
     }
-    if (this.picker.open && this.picker.loading) return true;
+    if (this.picker.open && (this.picker.loading || this.picker.scanning)) return true;
     if (this.binaryMode === "off" || this.binaryMode === "busy") return false;
     if (this.outputExpanded) return false;
     if (this.binaryMode === "on") return true;
@@ -2575,6 +2600,42 @@ export class TerminalUi {
     this.paint();
   }
 
+  /** Localized status of a provider's model catalog; null when it loaded fine. */
+  private catalogStatusText(provider: ResolvedProvider): string | null {
+    const t = this.i18n.t;
+    const origin = originOf(provider.baseUrl);
+    switch (provider.catalogStatus) {
+      case "loading":
+        return t("picker.status.loading");
+      case "auth-required":
+        return t("picker.status.authRequired");
+      case "denied":
+        return t("picker.status.denied");
+      case "api-not-found":
+        return t("picker.status.apiNotFound", { status: provider.httpStatus ?? 200 });
+      case "empty":
+        return t("picker.status.empty");
+      case "partial":
+        return t("picker.status.partial", { count: provider.models.length });
+      case "offline":
+        return t("picker.status.offline");
+      case "unreachable":
+        return t("picker.status.unreachable", { origin });
+      case "timeout":
+        return t("picker.status.timeout", { origin });
+      case "redirect":
+        return t("picker.status.redirect");
+      case "malformed":
+        return t("picker.status.malformed");
+      case "too-large":
+        return t("picker.status.tooLarge");
+      case "http-error":
+        return t("picker.status.httpError", { status: provider.httpStatus ?? 0 });
+      default:
+        return null;
+    }
+  }
+
   private pickerTabs(): readonly PickerTab[] {
     const connected = this.picker.providers.filter(
       (p) => p.connected && !p.local,
@@ -2588,10 +2649,14 @@ export class TerminalUi {
     const unconnected = this.picker.providers.filter(
       (p) => !p.connected && !p.local,
     );
+    const routersFirst = (list: readonly ResolvedProvider[]): ResolvedProvider[] => [
+      ...list.filter((p) => p.product),
+      ...list.filter((p) => !p.product),
+    ];
     const ordered = [
       ...connected,
-      ...localConnected,
-      ...localIdle,
+      ...routersFirst(localConnected),
+      ...routersFirst(localIdle),
       ...unconnected,
     ];
 
@@ -2600,6 +2665,7 @@ export class TerminalUi {
 
     const tabs: PickerTab[] = [
       {
+        kind: "all",
         id: "all",
         label: this.i18n.t("picker.all"),
         connected: connectedPool.length > 0,
@@ -2609,6 +2675,7 @@ export class TerminalUi {
     ];
     for (const p of ordered) {
       tabs.push({
+        kind: "provider",
         id: p.id,
         label: p.name,
         connected: p.connected,
@@ -2982,6 +3049,8 @@ export class TerminalUi {
     ) {
       this.picker.open = false;
       this.picker.loading = false;
+      this.picker.scanning = false;
+      this.options.onModelPickerClosed?.();
       this.syncFlowTimer();
       this.options.onSelectCompactionModel?.(null, saveDefault);
       this.paint();
@@ -3000,6 +3069,8 @@ export class TerminalUi {
     if (this.picker.purpose === "compaction") {
       this.picker.open = false;
       this.picker.loading = false;
+      this.picker.scanning = false;
+      this.options.onModelPickerClosed?.();
       this.syncFlowTimer();
       this.options.onSelectCompactionModel?.(
         `${selected.provider.id}:${selected.modelId}`,
@@ -3031,6 +3102,8 @@ export class TerminalUi {
     this.picker.stage = "model";
     this.picker.effortOnly = false;
     this.picker.loading = false;
+    this.picker.scanning = false;
+    this.options.onModelPickerClosed?.();
     this.syncFlowTimer();
 
     if (effortOnly || !provId || !modId) {
@@ -5124,7 +5197,7 @@ export class TerminalUi {
     const lines: string[] = [];
 
     // 1. Top title border
-    const spinBadge = this.picker.loading
+    const spinBadge = this.picker.loading || this.picker.scanning
       ? this.i18n.t("picker.live", { count: SPINNER_FRAMES[this.tick % SPINNER_FRAMES.length] })
       : "";
     const isCompactionPicker = this.picker.purpose === "compaction";
@@ -5234,16 +5307,32 @@ export class TerminalUi {
         const isTabSel = tabIdx === selTab;
         let leftCell = "";
         if (tab) {
+          const status = tab.provider?.catalogStatus;
           const dot =
             tab.id === "all"
               ? `${t.neonMint}◈${t.reset}`
-              : tab.connected
-                ? `${t.emerald}●${t.reset}`
-                : tab.local
-                  ? `${t.neonCyan}◌${t.reset}`
-                  : `${t.subtle}○${t.reset}`;
+              : status === "loading"
+                ? `${t.neonCyan}◌${t.reset}`
+                : status === "auth-required" || status === "denied" || status === "api-not-found"
+                  ? `${t.amber}○${t.reset}`
+                  : status !== undefined && status !== "ok" && status !== "partial" && status !== "empty"
+                    ? `${t.muted}○${t.reset}`
+                    : tab.connected
+                      ? `${t.emerald}●${t.reset}`
+                      : tab.local
+                        ? `${t.neonCyan}◌${t.reset}`
+                        : `${t.subtle}○${t.reset}`;
           const ptr = isTabSel ? `${t.neonCyan}${t.bold}▸${t.reset}` : " ";
-          const cnt = `${t.muted}${String(tab.modelCount)}${t.reset}`;
+          const cnt =
+            status === "loading"
+              ? `${t.muted}…${t.reset}`
+              : status === "auth-required" || status === "denied"
+                ? `${t.amber}KEY?${t.reset}`
+                : status === "api-not-found"
+                  ? `${t.amber}API?${t.reset}`
+                  : status !== undefined && status !== "ok" && status !== "partial" && status !== "empty"
+                    ? `${t.muted}OFF${t.reset}`
+                    : `${t.muted}${String(tab.modelCount)}${t.reset}`;
           const cntW = visibleWidth(cnt);
           const nameBudget = Math.max(6, leftPaneW - 5 - cntW);
           const nameColor = isTabSel
@@ -5274,7 +5363,7 @@ export class TerminalUi {
             !activeTab.provider.connected &&
             !activeTab.provider.local
               ? this.i18n.t("picker.connect", { key: activeTab.provider.envHint, provider: activeTab.provider.name })
-              : this.i18n.t("picker.noResults");
+              : (activeTab?.provider ? this.catalogStatusText(activeTab.provider) : null) ?? this.i18n.t("picker.noResults");
           rightCell = padEndAnsi(
             `${t.muted}${truncateAnsi(emptyHint, rightPaneW)}${t.reset}`,
             rightPaneW,
@@ -5301,7 +5390,7 @@ export class TerminalUi {
                         ? `${t.pillCyanBg}${t.neonCyan} LOCL ${t.reset}`
                         : `${t.pillCyanBg}${t.neonCyan} RDY  ${t.reset}`;
           const provPrefix =
-            selTab === 0 && mRow.source !== "inherit-active"
+            activeTab?.id === "all" && mRow.source !== "inherit-active"
               ? `${t.muted}${mRow.provider.id}:${t.reset}`
               : "";
           const modelColor = isRowSel
@@ -5368,7 +5457,7 @@ export class TerminalUi {
               ? `${t.violet}★${t.reset}`
               : " ";
           const provPrefix =
-            selTab === 0 ? `${t.muted}${mRow.provider.id}:${t.reset}` : "";
+            activeTab?.id === "all" ? `${t.muted}${mRow.provider.id}:${t.reset}` : "";
           const raw = `${ptr} ${provPrefix}${isRowSel ? `${t.bold}${t.fgBright}` : t.fg}${mRow.modelId}${t.reset}`;
           cell = `${isRowSel ? t.selBg : ""}${padEndAnsi(raw, innerW)}${t.reset}`;
         }
@@ -5492,9 +5581,19 @@ export class TerminalUi {
 
         if (footerInfoRows >= 2) {
           let info2: string;
+          const routerStatus = focusProvider?.product ? this.catalogStatusText(focusProvider) : null;
+          const focusedRow = rowsList[selRow];
           if (this.picker.notice) {
             const notice = typeof this.picker.notice === "function" ? this.picker.notice(this.i18n.t) : this.picker.notice;
             info2 = `${t.amber}◈ ${notice}${t.reset}`;
+          } else if (this.picker.scanning) {
+            info2 = `${t.neonCyan}◈ ${this.i18n.t("picker.status.scanning")}${t.reset}`;
+          } else if (focusProvider?.product && routerStatus) {
+            info2 = `${t.amber}◈ ${routerStatus}${t.reset}`;
+          } else if (focusProvider?.product && focusedRow && focusedRow.provider.id === focusProvider.id && focusedRow.source === "live" && !focusProvider.models.find((m) => m.id === focusedRow.modelId)?.capabilities?.contextWindow) {
+            info2 = `${t.muted}◈ ${this.i18n.t("picker.router.contextUnknown")}${t.reset}`;
+          } else if (focusProvider?.provenance === "detected" && focusProvider.product) {
+            info2 = `${t.muted}◈ ${this.i18n.t("picker.router.detected", { product: ROUTER_PRODUCTS[focusProvider.product].name, origin: originOf(focusProvider.baseUrl) })}${t.reset}`;
           } else if (
             focusProvider &&
             !focusProvider.connected &&

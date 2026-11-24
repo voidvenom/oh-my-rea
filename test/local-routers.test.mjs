@@ -1,10 +1,21 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { after, test } from "node:test";
+import { COMMANDS } from "../dist/commands.js";
+import { createTheme, stripAnsi, visibleWidth } from "../dist/ansi.js";
+import { DEFAULT_COMPACTION_SETTINGS } from "../dist/compaction.js";
+import { I18n } from "../dist/i18n/index.js";
+import { modelConfigPath, resolveModelConfig } from "../dist/modelConfig.js";
+import { ModelController } from "../dist/runtime/modelController.js";
+import { OutputSink } from "../dist/runtime/output.js";
+import { TerminalUi } from "../dist/tui.js";
 import { boundedGet } from "../dist/boundedHttp.js";
 import { customProviderId, parseKeyInput, sameEndpoint, validateCustomBaseUrl } from "../dist/customEndpoint.js";
 import { DISCOVERY_LIMITS, discoverLocalRouters, fetchCatalog, identifyRouter, routerCandidates } from "../dist/localRouters.js";
 import { lookupModelsDev, slimModelsDev } from "../dist/modelLimits.js";
-import { BUILTIN_PROVIDERS, extractLiveModelsFromPayload } from "../dist/providers.js";
+import { BUILTIN_PROVIDERS, ROUTER_PRODUCTS, discoverProvidersSync, extractLiveModelsFromPayload, refreshAllProviders } from "../dist/providers.js";
 import { genericOpenAiRoutes, ipv6Available, nineRouterRoutes, omniRouteRoutes, startServer } from "./fixtures/fake-routers.mjs";
 
 const servers = [];
@@ -312,4 +323,215 @@ test("IPv6 loopback candidates are probed", { skip: !(await ipv6Available()) }, 
   assert.equal(found.length, 1);
   assert.equal(found[0].origin, nine.origin);
   assert.equal(found[0].product, "9router");
+});
+
+// ── Controller and picker (P2) ───────────────────────────────────────────────
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const tempDirs = [];
+const tempDir = () => {
+  const dir = mkdtempSync(join(tmpdir(), "omr-routers-"));
+  tempDirs.push(dir);
+  return dir;
+};
+after(() => { for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true }); });
+
+/** A controller whose UI is a recording stub. `env` is complete: nothing is inherited from the host. */
+const makeController = (env) => {
+  const calls = [];
+  const output = new OutputSink({ json: true, writeStdout: () => {}, writeStderr: () => {} });
+  output.setUi({
+    openModelPicker: (...args) => calls.push({ type: "open", providers: args[0], args }),
+    updateModelPicker: (patch) => calls.push({ type: "update", patch }),
+    setStatus: () => {}, addSystem: () => {}, showOutput: () => {}, setNetworkStatus: () => {},
+  });
+  const controller = new ModelController(env, false, null, output, {
+    getCompactionSettings: () => DEFAULT_COMPACTION_SETTINGS,
+    setCompactionSettings: () => {},
+    onModelUpdated: async () => {},
+  });
+  return { controller, calls };
+};
+const hasHeader = (server, name) => server.requests.some((request) => request.headers[name] !== undefined);
+
+test("opening the picker paints before discovery and adds routers incrementally", async () => {
+  const nine = await serve(nineRouterRoutes());
+  const generic = await serve(genericOpenAiRoutes());
+  const { controller, calls } = makeController({
+    XDG_CONFIG_HOME: tempDir(), OMR_ROUTER_DISCOVERY: "1", OMR_ROUTER_PORTS: String(nine.port),
+    OPENAI_API_KEY: "sk-test-openai", OPENAI_BASE_URL: `${generic.origin}/v1`,
+  });
+  const started = performance.now();
+  controller.openInteractiveModelPicker(null);
+  assert.ok(performance.now() - started < 50);
+  const opened = calls.find((call) => call.type === "open");
+  assert.ok(opened);
+  assert.equal(opened.providers.some((provider) => provider.id === "9router"), false);
+  await controller.whenRouterDiscoveryIdle();
+  const router = controller.providers.find((provider) => provider.id === "9router");
+  assert.equal(router.product, "9router");
+  assert.equal(router.catalogStatus, "ok");
+  assert.equal(router.provenance, "detected");
+  assert.deepEqual(router.models.map((model) => model.id), ["cx/example-model", "cx/example-model:thinking", "example-combo"]);
+  assert.equal(calls.filter((call) => call.type === "update").at(-1).patch.scanning, false);
+  assert.ok(calls.some((call) => call.type === "update" && call.patch.scanning === true));
+  assert.equal(hasHeader(nine, "authorization"), false);
+  assert.equal(nine.requests.some((request) => JSON.stringify(request.headers).includes("sk-test-openai")), false);
+  await sleep(50);
+});
+
+test("a second open within the TTL does not re-probe, a forced refresh does", async () => {
+  const nine = await serve(nineRouterRoutes());
+  const { controller } = makeController({ XDG_CONFIG_HOME: tempDir(), OMR_ROUTER_DISCOVERY: "1", OMR_ROUTER_PORTS: String(nine.port) });
+  await controller.startRouterDiscovery(false);
+  const first = nine.requests.length;
+  assert.ok(first > 0);
+  controller.openInteractiveModelPicker(null);
+  await controller.whenRouterDiscoveryIdle();
+  assert.equal(nine.requests.length, first);
+  await controller.triggerProvidersRefresh(true);
+  assert.ok(nine.requests.length > first);
+  await sleep(50);
+});
+
+test("refresh replaces a swapped router on the same port", async () => {
+  const nineRoutes = nineRouterRoutes();
+  const omniRoutes = omniRouteRoutes({ models: [{ id: "auto/coding:fast", object: "model" }] });
+  let current = nineRoutes;
+  const server = await serve(new Proxy({}, { get: (_target, key) => current[key] }));
+  const { controller } = makeController({ XDG_CONFIG_HOME: tempDir(), OMR_ROUTER_DISCOVERY: "1", OMR_ROUTER_PORTS: String(server.port) });
+  await controller.startRouterDiscovery(false);
+  assert.ok(controller.providers.some((provider) => provider.id === "9router"));
+  current = omniRoutes;
+  await controller.startRouterDiscovery(true);
+  assert.equal(controller.providers.some((provider) => provider.id === "9router"), false);
+  const omni = controller.providers.find((provider) => provider.id === "omniroute");
+  assert.deepEqual(omni.models.map((model) => model.id), ["auto/coding:fast"]);
+});
+
+test("closing the picker cancels discovery without late updates", async () => {
+  const hanging = await serve({ "GET /api/health": "hang" });
+  const { controller, calls } = makeController({ XDG_CONFIG_HOME: tempDir(), OMR_ROUTER_DISCOVERY: "1", OMR_ROUTER_PORTS: String(hanging.port) });
+  const job = controller.startRouterDiscovery(false);
+  await sleep(50);
+  controller.cancelRouterDiscovery();
+  const before = calls.length;
+  await sleep(600);
+  assert.equal(calls.length, before);
+  await controller.whenRouterDiscoveryIdle();
+  await job;
+});
+
+test("an unsaved router that disappears is removed unless it is the active provider", async () => {
+  const detect = async () => {
+    const server = await startServer(nineRouterRoutes());
+    const made = makeController({ XDG_CONFIG_HOME: tempDir(), OMR_ROUTER_DISCOVERY: "1", OMR_ROUTER_PORTS: String(server.port), OMR_MODEL: "gpt-4.1", OPENAI_API_KEY: "k", OPENAI_BASE_URL: "http://127.0.0.1:9/v1" });
+    await made.controller.startRouterDiscovery(false);
+    assert.ok(made.controller.providers.some((provider) => provider.id === "9router"));
+    return { ...made, server };
+  };
+  const gone = await detect();
+  await gone.server.close();
+  await gone.controller.startRouterDiscovery(true);
+  assert.equal(gone.controller.providers.some((provider) => provider.id === "9router"), false);
+
+  const active = await detect();
+  await active.controller.applyModelSelection("9router", "cx/example-model", false);
+  await active.server.close();
+  await active.controller.startRouterDiscovery(true);
+  const kept = active.controller.providers.find((provider) => provider.id === "9router");
+  assert.equal(kept.catalogStatus, "offline");
+  assert.equal(kept.models.length, 3);
+});
+
+test("env-configured routers resolve synchronously at startup", async () => {
+  const nine = await serve(nineRouterRoutes());
+  const env = { XDG_CONFIG_HOME: tempDir(), OMR_OMNIROUTE_BASE_URL: `${nine.origin}/v1`, OMR_OMNIROUTE_API_KEY: "ko", OMR_ROUTER_DISCOVERY: "0" };
+  const providers = discoverProvidersSync(env, null);
+  const omni = providers.find((provider) => provider.id === "omniroute");
+  assert.equal(omni.provenance, "env-router");
+  assert.equal(omni.apiKey, "ko");
+  assert.equal(omni.product, "omniroute");
+  const info = resolveModelConfig(env, "omniroute:auto/coding:fast");
+  assert.equal(info.config.providerId, "omniroute");
+  assert.equal(info.config.model, "auto/coding:fast");
+  assert.equal(info.config.baseUrl, `${nine.origin}/v1`);
+  assert.equal(nine.requests.length, 0);
+});
+
+test("named-provider duplicates from older saves are not rebuilt and never get OPENAI_API_KEY", async () => {
+  const nine = await serve(nineRouterRoutes());
+  const dir = tempDir();
+  const env = { XDG_CONFIG_HOME: dir, OPENAI_API_KEY: "sk-leak" };
+  const named = `${nine.origin}/v1`;
+  const top = named.replace("127.0.0.1", "localhost");
+  const stored = { provider: "9router", model: "cx/example-model", base_url: top, api_key_env: "OPENAI_API_KEY", providers: { "9router": { name: "9Router", base_url: named, protocol: "openai-chat", router: "9router" } } };
+  const providers = discoverProvidersSync(env, stored);
+  assert.equal(providers.some((provider) => provider.id === "custom"), false);
+  const router = providers.find((provider) => provider.id === "9router");
+  assert.equal(router.apiKey, "");
+  assert.equal(router.provenance, "config-named");
+  assert.equal(router.product, "9router");
+  await refreshAllProviders(providers.filter((provider) => provider.local));
+  assert.equal(nine.requests.some((request) => JSON.stringify(request.headers).includes("sk-leak")), false);
+});
+
+const routerEntry = (id, product, status, count = 0) => ({
+  id, name: ROUTER_PRODUCTS[product].name, protocol: "openai-chat", baseUrl: `http://127.0.0.1:${product === "9router" ? 20128 : 20127}/v1`,
+  connected: true, local: true, apiKey: "", apiKeyEnv: "", keySource: "local (no key)", envHint: "", headers: {},
+  models: Array.from({ length: count }, (_, i) => ({ id: `cx/model-${i}`, label: `cx/model-${i}`, source: "live" })),
+  liveLoaded: true, error: null, provenance: "detected", product, catalogStatus: status,
+});
+
+const pickerFor = async (language) => {
+  const i18n = new I18n();
+  await i18n.initialize(language, { XDG_CONFIG_HOME: tempDir() });
+  const base = discoverProvidersSync({ OPENAI_API_KEY: "sk-render-secret" }, null);
+  const providers = [
+    base.find((provider) => provider.id === "openai"),
+    routerEntry("9router", "9router", "ok", 37),
+    routerEntry("omniroute", "omniroute", "auth-required"),
+    base.find((provider) => provider.id === "ollama"),
+  ];
+  const ui = new TerminalUi({
+    i18n, commands: COMMANDS, theme: createTheme({ COLORTERM: "truecolor", TERM: "xterm-256color" }),
+    providers: () => providers, onSubmit: () => {}, onInterrupt: () => {}, onExit: () => {},
+  });
+  return { ui, providers };
+};
+const frameText = (ui, cols, rows) => ui.renderFrame(cols, rows).lines.map(stripAnsi).join("\n");
+
+test("picker renders router statuses within width in English and Turkish", async () => {
+  for (const [language, auth, scanning] of [
+    ["en", "API key required", "Checking local routers…"],
+    ["tr", "API anahtarı gerekiyor", "Yerel yönlendiriciler denetleniyor…"],
+  ]) {
+    const { ui, providers } = await pickerFor(language);
+    ui.openModelPicker(providers, "openai", "gpt-4.1", null, false, "auto");
+    ui.updateModelPicker({ scanning: true });
+    for (const [cols, rows] of [[54, 15], [80, 24], [120, 36], [136, 38]]) {
+      for (const line of ui.renderFrame(cols, rows).lines) assert.ok(visibleWidth(line) <= cols, `${language} ${cols}: ${stripAnsi(line)}`);
+    }
+    assert.match(frameText(ui, 80, 24), new RegExp(scanning));
+    ui.updateModelPicker({ scanning: false });
+    const list = frameText(ui, 120, 36);
+    assert.match(list, /9Router/);
+    assert.match(list, /KEY\?/);
+    assert.equal(list.includes("sk-render-secret"), false);
+    for (let i = 0; i < 3; i += 1) ui.handleKey("\t");   // All -> openai -> 9router -> omniroute
+    assert.match(frameText(ui, 120, 36), new RegExp(auth));
+    for (const [cols, rows] of [[54, 15], [80, 24], [120, 36], [136, 38]]) {
+      for (const line of ui.renderFrame(cols, rows).lines) assert.ok(visibleWidth(line) <= cols);
+    }
+  }
+});
+
+test("the All tab is still the default and keeps provider prefixes", async () => {
+  const { ui, providers } = await pickerFor("en");
+  ui.openModelPicker(providers, "openai", "gpt-4.1", null, false, "auto");
+  const wide = frameText(ui, 120, 36);
+  assert.match(wide, /▸◈ All Connected/);
+  assert.match(wide, /openai:gpt-4\.1/);
+  assert.match(wide, /9router:cx\/model-0/);
+  assert.match(frameText(ui, 60, 18), /openai:/);
 });

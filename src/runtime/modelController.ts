@@ -23,6 +23,8 @@ import {
   type ModelConfigInfo,
   type ReasoningEffort,
 } from "../modelConfig.js";
+import { sameEndpoint } from "../customEndpoint.js";
+import type { CatalogCache, RouterCandidate } from "../localRouters.js";
 import {
   discoverProvidersSync,
   fetchProviderModels,
@@ -45,7 +47,15 @@ export interface ModelControllerCallbacks {
  */
 export class ModelController {
   storedModelConfig: Record<string, unknown> | null;
-  providers: readonly ResolvedProvider[];
+  /** Config and built-in providers, as discovered and live-refreshed. */
+  private baseProviders: readonly ResolvedProvider[];
+  /** Detected routers and session providers; merged into `providers` on every change. */
+  private readonly overlays = new Map<string, ResolvedProvider>();
+  private merged: readonly ResolvedProvider[];
+  private discoveryJob: { readonly generation: number; readonly abort: AbortController; readonly done: Promise<void> } | null = null;
+  private discoveryGeneration = 0;
+  private lastScan: { readonly at: number; readonly found: number; readonly signature: string } | null = null;
+  private readonly catalogCache: CatalogCache = new Map();
   modelInfo: ModelConfigInfo | null = null;
   modelError: string | null = null;
   modelId: string;
@@ -78,7 +88,8 @@ export class ModelController {
             }),
         }));
     this.storedModelConfig = readStoredModelConfig(env);
-    this.providers = discoverProvidersSync(env, this.storedModelConfig);
+    this.baseProviders = discoverProvidersSync(env, this.storedModelConfig);
+    this.merged = this.baseProviders;
 
     if (!noModel) {
       try {
@@ -91,6 +102,49 @@ export class ModelController {
     this.modelId = noModel
       ? "no-model"
       : (this.modelInfo?.config.model ?? "unconfigured");
+  }
+
+  get providers(): readonly ResolvedProvider[] {
+    return this.merged;
+  }
+
+  private setBaseProviders(next: readonly ResolvedProvider[]): void {
+    this.baseProviders = next;
+    this.recomputeProviders();
+  }
+
+  /** Apply `update` to the base entry and the overlay entry with this id (either may be absent). */
+  private updateProvider(id: string, update: (provider: ResolvedProvider) => ResolvedProvider): void {
+    const overlay = this.overlays.get(id);
+    if (overlay) this.overlays.set(id, update(overlay));
+    this.baseProviders = this.baseProviders.map((provider) => (provider.id === id ? update(provider) : provider));
+    this.recomputeProviders();
+  }
+
+  /**
+   * Overlays that describe the same endpoint as a base provider enrich it (the base keeps its id, name and key);
+   * all other overlays are appended. Base providers are never replaced by an overlay's credentials.
+   */
+  private recomputeProviders(): void {
+    const out = [...this.baseProviders];
+    for (const overlay of this.overlays.values()) {
+      const index = out.findIndex((provider) => provider.id === overlay.id || sameEndpoint(provider.baseUrl, overlay.baseUrl));
+      const existing = index >= 0 ? out[index] : undefined;
+      if (existing) {
+        out[index] = {
+          ...existing,
+          ...(existing.product ?? overlay.product ? { product: (existing.product ?? overlay.product)! } : {}),
+          ...(overlay.catalogStatus ? { catalogStatus: overlay.catalogStatus } : {}),
+          ...(overlay.httpStatus !== undefined ? { httpStatus: overlay.httpStatus } : {}),
+          models: overlay.models.length > 0 ? overlay.models : existing.models,
+          liveLoaded: existing.liveLoaded || overlay.liveLoaded,
+          error: overlay.error ?? existing.error,
+        };
+      } else {
+        out.push(overlay);
+      }
+    }
+    this.merged = out;
   }
 
   resolveSpecInfo(rawSpec: string, roleLabel = "model"): ModelConfigInfo {
@@ -184,14 +238,17 @@ export class ModelController {
     const state: { refreshed: ResolvedProvider | null } = { refreshed: null };
     const live = async () => {
       if (!provider?.baseUrl || (!provider.connected && !provider.local)) return undefined;
+      // Routers and session endpoints get their catalog (with limits) from the bounded fetch, never the legacy probe.
+      if (provider.product || provider.provenance === "detected" || provider.provenance === "session") {
+        return provider.models.find((candidate) => candidate.id === config.model)?.capabilities;
+      }
       const timeout = AbortSignal.timeout(6_000);
       state.refreshed = await fetchProviderModels(provider, signal ? AbortSignal.any([signal, timeout]) : timeout);
       return state.refreshed.models.find((candidate) => candidate.id === config.model)?.capabilities;
     };
     const resolved = await resolveLimits(providerId, config.baseUrl, config.model, { env: this.env, live, ...(signal ? { signal } : {}) });
     const metadata = resolved?.metadata;
-    this.providers = this.providers.map((candidate) => {
-      if (candidate.id !== providerId) return candidate;
+    this.updateProvider(providerId, (candidate) => {
       const base = state.refreshed ?? candidate;
       if (!metadata) return base;
       const known = base.models.some((model) => model.id === config.model);
@@ -316,9 +373,9 @@ export class ModelController {
   }
 
   private syncDiscoveredProviders(): void {
-    const prevById = new Map(this.providers.map((p) => [p.id, p]));
+    const prevById = new Map(this.baseProviders.map((p) => [p.id, p]));
     const fresh = discoverProvidersSync(this.env, this.storedModelConfig);
-    this.providers = fresh.map((p) => {
+    this.setBaseProviders(fresh.map((p) => {
       const prev = prevById.get(p.id);
       if (
         prev &&
@@ -335,15 +392,20 @@ export class ModelController {
         };
       }
       return p;
-    });
+    }));
   }
 
   async triggerProvidersRefresh(
     force = false,
   ): Promise<readonly ResolvedProvider[]> {
-    if (this.providersRefreshing) return this.providers;
-    const anyConnectedPending = this.providers.some(
-      (p) => p.connected && !p.local && !p.liveLoaded,
+    // A forced refresh also re-scans for routers (even when a provider refresh is already running).
+    const discovery = force ? this.startRouterDiscovery(true) : Promise.resolve();
+    if (this.providersRefreshing) {
+      await discovery;
+      return this.providers;
+    }
+    const anyConnectedPending = this.baseProviders.some(
+      (p) => p.connected && !p.local && !p.liveLoaded && !p.product,
     );
     if (!force && this.providersRefreshedOnce && !anyConnectedPending) {
       return this.providers;
@@ -355,14 +417,19 @@ export class ModelController {
       this.syncDiscoveredProviders();
       const toRefresh = force
         ? discoverProvidersSync(this.env, this.storedModelConfig)
-        : this.providers;
-      this.providers = await refreshAllProviders(toRefresh);
+        : this.baseProviders;
+      // Routers (env-configured or saved) are refreshed by the bounded catalog fetch in the discovery job.
+      const refreshed = new Map(
+        (await refreshAllProviders(toRefresh.filter((p) => !p.product))).map((p) => [p.id, p]),
+      );
+      this.setBaseProviders(toRefresh.map((p) => refreshed.get(p.id) ?? p));
+      await discovery;
       const allConnectedLoaded = this.providers
-        .filter((p) => p.connected && !p.local)
+        .filter((p) => p.connected && !p.local && !p.product)
         .every((p) => p.liveLoaded);
       this.providersRefreshedOnce = allConnectedLoaded;
       const errProv = this.providers.find(
-        (p) => p.connected && !p.local && p.error,
+        (p) => p.connected && !p.local && !p.product && p.error,
       );
       this.output.ui?.updateModelPicker({
         providers: this.providers,
@@ -374,6 +441,125 @@ export class ModelController {
       this.providersRefreshing = false;
       this.output.ui?.updateModelPicker({ loading: false });
     }
+  }
+
+  // ── Local router discovery ────────────────────────────────────────────────
+
+  private discoveryCandidates(routerCandidates: (env: NodeJS.ProcessEnv) => readonly RouterCandidate[]): readonly RouterCandidate[] {
+    const candidates = [...routerCandidates(this.env)];
+    // Saved router providers are refreshed here (bounded fetch, own key) instead of the legacy probe.
+    for (const provider of this.baseProviders) {
+      if (!provider.product || provider.provenance !== "config-named") continue;
+      if (candidates.some((candidate) => candidate.explicit === provider.product && sameEndpoint(candidate.apiBase, provider.baseUrl))) continue;
+      let origin: string;
+      try {
+        origin = new URL(provider.baseUrl).origin;
+      } catch {
+        continue;
+      }
+      candidates.unshift({ origin, apiBase: provider.baseUrl, explicit: provider.product, apiKey: provider.apiKey });
+    }
+    return candidates;
+  }
+
+  /** The overlay id for a router: the matching base provider's id, an existing overlay's id, else the product id. */
+  private routerOverlayId(product: string, apiBase: string): string {
+    const base = this.baseProviders.find((provider) => sameEndpoint(provider.baseUrl, apiBase));
+    if (base) return base.id;
+    for (const [id, overlay] of this.overlays) {
+      if (overlay.provenance === "detected" && overlay.product === product && sameEndpoint(overlay.baseUrl, apiBase)) return id;
+    }
+    for (let n = 1; ; n += 1) {
+      const id = n === 1 ? product : `${product}-${n}`;
+      if (!this.baseProviders.some((provider) => provider.id === id) && !this.overlays.has(id)) return id;
+    }
+  }
+
+  /**
+   * Looks for local routers without blocking the picker. Results arrive incrementally through
+   * `updateModelPicker`; a stale job (cancelled or superseded) never touches state.
+   */
+  startRouterDiscovery(force = false): Promise<void> {
+    if (this.noModel) return Promise.resolve();
+    if (this.discoveryJob && !force) return this.discoveryJob.done;
+    const ui = this.output.ui;
+    const run = async (generation: number, signal: AbortSignal): Promise<void> => {
+      const { discoverLocalRouters, routerCandidates, routerProvider, DISCOVERY_LIMITS } = await import("../localRouters.js");
+      const candidates = this.discoveryCandidates(routerCandidates);
+      if (candidates.length === 0) return;
+      const signature = candidates.map((candidate) => `${candidate.explicit ?? ""}@${candidate.apiBase}`).join(",");
+      const last = this.lastScan;
+      if (
+        !force &&
+        last?.signature === signature &&
+        Date.now() - last.at < (last.found > 0 ? DISCOVERY_LIMITS.scanPositiveTtlMs : DISCOVERY_LIMITS.scanNegativeTtlMs)
+      ) {
+        ui?.updateModelPicker({ providers: this.providers });
+        return;
+      }
+      ui?.updateModelPicker({ scanning: true });
+      const touched = new Set<string>();
+      const current = (): boolean => generation === this.discoveryGeneration && !signal.aborted;
+      const found = await discoverLocalRouters({
+        env: this.env,
+        signal,
+        candidates,
+        cache: this.catalogCache,
+        force,
+        onRouter: (router) => {
+          if (!current()) return;
+          const id = this.routerOverlayId(router.product, router.apiBase);
+          // A product that moved to another origin replaces its earlier overlay.
+          for (const [otherId, other] of this.overlays) {
+            if (otherId !== id && other.provenance === "detected" && other.product === router.product) {
+              this.overlays.delete(otherId);
+              touched.delete(otherId);
+            }
+          }
+          this.overlays.set(id, routerProvider(router, id, this.env));
+          touched.add(id);
+          this.recomputeProviders();
+          ui?.updateModelPicker({ providers: this.providers });
+        },
+      });
+      if (!current()) return;
+      const activeId = this.modelInfo?.config.providerId ?? null;
+      for (const [id, overlay] of [...this.overlays]) {
+        if (overlay.provenance !== "detected" || touched.has(id)) continue;
+        if (id === activeId) {
+          this.overlays.set(id, { ...overlay, catalogStatus: "offline", connected: true });
+        } else {
+          this.overlays.delete(id);
+        }
+      }
+      this.recomputeProviders();
+      this.lastScan = { at: Date.now(), found: found.length, signature };
+      ui?.updateModelPicker({ providers: this.providers });
+    };
+    const generation = (this.discoveryGeneration += 1);
+    this.discoveryJob?.abort.abort();
+    const abort = new AbortController();
+    const done: Promise<void> = run(generation, abort.signal)
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.discoveryJob?.generation !== generation) return;
+        this.discoveryJob = null;
+        if (!abort.signal.aborted) ui?.updateModelPicker({ scanning: false, providers: this.providers });
+      });
+    this.discoveryJob = { generation, abort, done };
+    return done;
+  }
+
+  /** Stops an in-flight scan (the picker was closed). Overlays already applied stay. */
+  cancelRouterDiscovery(): void {
+    if (!this.discoveryJob) return;
+    this.discoveryGeneration += 1;
+    this.discoveryJob.abort.abort();
+    this.discoveryJob = null;
+  }
+
+  async whenRouterDiscoveryIdle(): Promise<void> {
+    while (this.discoveryJob) await this.discoveryJob.done;
   }
 
   openInteractiveModelPicker(focusProviderId?: string | null): void {
@@ -390,7 +576,7 @@ export class ModelController {
     this.syncDiscoveredProviders();
     const needsRefresh =
       !this.providersRefreshedOnce ||
-      this.providers.some((p) => p.connected && !p.local && !p.liveLoaded);
+      this.providers.some((p) => p.connected && !p.local && !p.liveLoaded && !p.product);
     ui.openModelPicker(
       this.providers,
       this.modelInfo?.config.providerId ?? null,
@@ -402,6 +588,7 @@ export class ModelController {
     if (needsRefresh) {
       void this.triggerProvidersRefresh(false);
     }
+    void this.startRouterDiscovery(false);
   }
 
   openInteractiveEffortPicker(): void {
@@ -436,7 +623,7 @@ export class ModelController {
     }
     this.storedModelConfig = readStoredModelConfig(this.env);
     if (!this.providersRefreshedOnce) {
-      this.providers = discoverProvidersSync(this.env, this.storedModelConfig);
+      this.setBaseProviders(discoverProvidersSync(this.env, this.storedModelConfig));
     }
     const settings = this.callbacks.getCompactionSettings();
     ui.openCompactionModelPicker(
@@ -449,6 +636,7 @@ export class ModelController {
     if (!this.providersRefreshedOnce) {
       void this.triggerProvidersRefresh(false);
     }
+    void this.startRouterDiscovery(false);
   }
 
   applyCompactionModelSelection(
@@ -671,9 +859,9 @@ export class ModelController {
     this.modelId = selectedModel;
     const saved = saveDefaultModelConfig(this.modelInfo, this.env);
     this.storedModelConfig = readStoredModelConfig(this.env);
-    this.providers = discoverProvidersSync(this.env, this.storedModelConfig).map(
+    this.setBaseProviders(discoverProvidersSync(this.env, this.storedModelConfig).map(
       (p) => (p.id === "custom" ? { ...refreshed, models: refreshed.models.length > 0 ? refreshed.models : p.models } : p),
-    );
+    ));
     await this.callbacks.onModelUpdated();
     this.output.ui?.setStatus({
       model: this.modelId,
