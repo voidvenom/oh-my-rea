@@ -4,11 +4,14 @@ This project uses the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) f
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-24
+
 ### Added
 
 - The model picker (`Alt+M`, `/model`) finds 9Router and OmniRoute running on this computer and lists their models. While the picker is open it checks `127.0.0.1` and `::1` on ports 20128, 20127 and 20129 without sending any API key, and labels a router only when the router's own identity endpoints answer. Models keep their exact IDs, so `9router:cx/model:thinking` works in `/model`, `fallback_models` and the saved default. Set `OMR_9ROUTER_BASE_URL` / `OMR_OMNIROUTE_BASE_URL` for other addresses, `OMR_9ROUTER_API_KEY` / `OMR_OMNIROUTE_API_KEY` for router keys, `OMR_ROUTER_PORTS` for other ports, or `OMR_ROUTER_DISCOVERY=0` to turn the check off.
 - A **Custom provider** entry at the top of the model picker connects any OpenAI-compatible endpoint. Enter the base URL and an optional API key (or `$ENV_NAME`), test the connection, then pick a model from the endpoint's list. A typed key stays in memory for the session and is sent only to that address; a key for a remote address is sent only after you confirm it. `Alt+S` saves the endpoint under `providers` in `omr-model.json`; a typed key is written only after a second `Alt+S`.
 - `/providers` reports `router` and `catalog_status` for each provider.
+- Router detection and the Custom provider flow are verified against fixtures and fake local routers, not yet against real 9Router or OmniRoute instances. If detection misses yours, set `OMR_9ROUTER_BASE_URL` or `OMR_OMNIROUTE_BASE_URL` and report it.
 
 ### Changed
 
