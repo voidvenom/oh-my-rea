@@ -58,6 +58,15 @@ import {
   REASONING_EFFORT_LEVELS,
   type ReasoningEffort,
 } from "./modelConfig.js";
+import {
+  parseKeyInput,
+  validateCustomBaseUrl,
+  type CustomEndpointRequest,
+  type CustomEndpointTestResult,
+  type KeyInput,
+  type UrlRejectReason,
+  type ValidatedBaseUrl,
+} from "./customEndpoint.js";
 import { ROUTER_PRODUCTS, type ResolvedProvider } from "./providers.js";
 import {
   stripInternalPromptNotes,
@@ -165,6 +174,8 @@ export interface UiOptions {
   onOpenCompactionModelPicker?: () => void;
   /** The model picker closed (selection, Esc or another surface); background scans can stop. */
   onModelPickerClosed?: () => void;
+  /** Tests a Custom provider endpoint (bounded catalog fetch); the key goes only to that endpoint. */
+  onTestCustomEndpoint?: (request: CustomEndpointRequest, signal: AbortSignal) => Promise<CustomEndpointTestResult>;
   onSelectModel?: (
     providerId: string,
     modelId: string,
@@ -267,7 +278,7 @@ interface PaletteItem {
 }
 
 interface PickerTab {
-  readonly kind: "all" | "provider";
+  readonly kind: "custom" | "all" | "provider";
   readonly id: string;
   readonly label: string;
   readonly connected: boolean;
@@ -287,6 +298,20 @@ interface PickerModelRow {
     | "custom-input"
     | "inherit-active";
   readonly active: boolean;
+}
+
+interface CustomWizardState {
+  step: "url" | "key" | "confirm" | "testing";
+  /** Raw input, rendered as typed. */
+  url: string;
+  /** Raw key input. Never rendered; cleared whenever the wizard leaves the key step or closes. */
+  key: string;
+  validated: ValidatedBaseUrl | null;
+  keyInput: KeyInput | null;
+  /** Set when the wizard was opened from a router that needs a key. */
+  targetProviderId: string | null;
+  error: LocalizedMessage | null;
+  abort: AbortController | null;
 }
 
 interface ModelPickerState {
@@ -309,6 +334,7 @@ interface ModelPickerState {
   loading: boolean;
   /** A local router scan is running. */
   scanning: boolean;
+  wizard: CustomWizardState | null;
   notice: string | LocalizedMessage | null;
 }
 
@@ -576,8 +602,10 @@ export class TerminalUi {
     query: "",
     loading: false,
     scanning: false,
+    wizard: null,
     notice: null,
   };
+  private wizardGeneration = 0;
 
   private sessionPicker: SessionPickerState = {
     open: false,
@@ -696,16 +724,18 @@ export class TerminalUi {
     this.picker.query = "";
     this.picker.loading = loading;
     this.picker.scanning = false;
+    this.discardWizard();
     this.picker.notice = null;
     this.paletteOpen = false;
     this.outputExpanded = false;
 
     const tabs = this.pickerTabs();
+    const allTab = Math.max(0, tabs.findIndex((t) => t.kind === "all"));
     if (focusProviderId) {
       const idx = tabs.findIndex((t) => t.id === focusProviderId.toLowerCase());
-      this.picker.selectedTab = idx >= 0 ? idx : 0;
+      this.picker.selectedTab = idx >= 0 ? idx : allTab;
     } else {
-      this.picker.selectedTab = 0;
+      this.picker.selectedTab = allTab;
     }
     const rows = this.pickerRows();
     const activeIdx = rows.findIndex((r) => r.active);
@@ -735,6 +765,7 @@ export class TerminalUi {
     this.picker.query = "";
     this.picker.loading = loading;
     this.picker.scanning = false;
+    this.discardWizard();
     this.picker.notice = (t) => t("picker.compactionHelp");
     this.paletteOpen = false;
     this.outputExpanded = false;
@@ -762,6 +793,9 @@ export class TerminalUi {
     );
     this.picker.stage = "effort";
     this.picker.effortOnly = true;
+    // The effort picker has no Custom provider tab, so the focused provider's index changed.
+    const focused = this.pickerTabs().findIndex((t) => t.id === activeProviderId);
+    this.picker.selectedTab = Math.max(0, focused);
     this.paint();
   }
 
@@ -805,6 +839,7 @@ export class TerminalUi {
     this.picker.open = false;
     this.picker.loading = false;
     this.picker.scanning = false;
+    this.discardWizard();
     this.options.onModelPickerClosed?.();
     this.syncFlowTimer();
     this.paint();
@@ -816,6 +851,7 @@ export class TerminalUi {
 
   openSessionPicker(sessions: readonly SavedSessionSummary[]): void {
     if (this.picker.open) this.options.onModelPickerClosed?.();
+    this.discardWizard();
     this.picker.open = false;
     this.picker.scanning = false;
     this.paletteOpen = false;
@@ -1580,7 +1616,7 @@ export class TerminalUi {
     if (this.networkGuard !== null && this.networkGuard.state !== "restored") {
       return true;
     }
-    if (this.picker.open && (this.picker.loading || this.picker.scanning)) return true;
+    if (this.picker.open && (this.picker.loading || this.picker.scanning || this.picker.wizard?.step === "testing")) return true;
     if (this.binaryMode === "off" || this.binaryMode === "busy") return false;
     if (this.outputExpanded) return false;
     if (this.binaryMode === "on") return true;
@@ -2663,7 +2699,18 @@ export class TerminalUi {
     const connectedPool = this.picker.providers.filter((p) => p.connected);
     const allCount = connectedPool.reduce((acc, p) => acc + p.models.length, 0);
 
-    const tabs: PickerTab[] = [
+    const tabs: PickerTab[] = [];
+    if (this.customTabEnabled()) {
+      tabs.push({
+        kind: "custom",
+        id: "+custom",
+        label: this.i18n.t("picker.custom.tab"),
+        connected: false,
+        local: false,
+        modelCount: 0,
+      });
+    }
+    tabs.push(
       {
         kind: "all",
         id: "all",
@@ -2672,7 +2719,7 @@ export class TerminalUi {
         local: false,
         modelCount: allCount,
       },
-    ];
+    );
     for (const p of ordered) {
       tabs.push({
         kind: "provider",
@@ -2690,7 +2737,7 @@ export class TerminalUi {
   private pickerRows(): readonly PickerModelRow[] {
     const tabs = this.pickerTabs();
     const tab = tabs[this.picker.selectedTab] ?? tabs[0];
-    if (!tab) return [];
+    if (!tab || tab.kind === "custom") return [];
 
     let pool: readonly ResolvedProvider[];
     if (tab.id === "all") {
@@ -2826,6 +2873,320 @@ export class TerminalUi {
     return rows;
   }
 
+  // ── Custom provider wizard ────────────────────────────────────────────────
+
+  private customTabEnabled(): boolean {
+    return (
+      this.picker.purpose === "active" &&
+      !this.picker.effortOnly &&
+      this.options.onTestCustomEndpoint !== undefined
+    );
+  }
+
+  private selectedPickerTab(): PickerTab | undefined {
+    const tabs = this.pickerTabs();
+    return tabs[Math.min(Math.max(0, this.picker.selectedTab), tabs.length - 1)];
+  }
+
+  /** Aborts a running test and forgets everything typed, including the key. */
+  private discardWizard(): void {
+    const wizard = this.picker.wizard;
+    if (!wizard) return;
+    wizard.abort?.abort();
+    wizard.key = "";
+    wizard.keyInput = null;
+    this.picker.wizard = null;
+    this.wizardGeneration += 1;
+  }
+
+  private startWizard(seed = "", target: ResolvedProvider | null = null): void {
+    this.discardWizard();
+    this.picker.notice = null;
+    const validated = target ? validateCustomBaseUrl(target.baseUrl) : null;
+    if (target && !validated?.ok) return;
+    this.picker.wizard = {
+      step: target ? "key" : "url",
+      url: target ? target.baseUrl : seed,
+      key: "",
+      validated: validated?.ok ? validated.value : null,
+      keyInput: null,
+      targetProviderId: target?.id ?? null,
+      error: null,
+      abort: null,
+    };
+    this.paint();
+  }
+
+  private urlRejectMessage(reason: UrlRejectReason, host: string | undefined): LocalizedMessage {
+    switch (reason) {
+      case "empty":
+        return (t) => t("picker.custom.errorEmpty");
+      case "scheme":
+        return (t) => t("picker.custom.errorScheme");
+      case "too-long":
+        return (t) => t("picker.custom.errorTooLong");
+      case "credentials":
+        return (t) => t("picker.custom.errorCredentials");
+      case "query":
+        return (t) => t("picker.custom.errorQuery");
+      case "host":
+        return (t) => t("picker.custom.errorHost", { host: host ?? "" });
+      case "invalid":
+        return (t) => t("picker.custom.errorInvalid");
+    }
+  }
+
+  private handleWizardPlain(text: string): void {
+    const wizard = this.picker.wizard;
+    if (!wizard || (wizard.step !== "url" && wizard.step !== "key")) return;
+    // Neither a URL nor a key contains whitespace; pasted newlines and spaces are dropped.
+    const clean = text.replace(/\s+/g, "");
+    if (!clean) return;
+    if (wizard.step === "url") wizard.url = `${wizard.url}${clean}`.slice(0, 4200);
+    else wizard.key = `${wizard.key}${clean}`.slice(0, 4200);
+    wizard.error = null;
+    this.paint();
+  }
+
+  private handleWizardKey(sequence: string): void {
+    const wizard = this.picker.wizard;
+    if (!wizard) return;
+    switch (sequence) {
+      case "\x03":
+      case "\x1bm":
+      case "\x1bc":
+      case "\x1bOQ":
+      case "\x1b[12~":
+      case "\x1b[[B":
+        this.closeModelPicker();
+        return;
+      case "\x1b":
+        this.wizardBack();
+        return;
+      case "\r":
+      case "\n":
+        this.wizardNext();
+        return;
+      case "\x7f":
+        if (wizard.step === "url" || wizard.step === "key") {
+          const field = wizard.step === "url" ? wizard.url : wizard.key;
+          const next = field.slice(0, prevCodePointIndex(field, field.length));
+          if (wizard.step === "url") wizard.url = next;
+          else wizard.key = next;
+          wizard.error = null;
+          this.paint();
+        }
+        return;
+      case "\x15":
+        if (wizard.step === "url") wizard.url = "";
+        else if (wizard.step === "key") wizard.key = "";
+        wizard.error = null;
+        this.paint();
+        return;
+      default:
+        return;
+    }
+  }
+
+  private wizardBack(): void {
+    const wizard = this.picker.wizard;
+    if (!wizard) return;
+    wizard.error = null;
+    switch (wizard.step) {
+      case "testing":
+        wizard.abort?.abort();
+        wizard.abort = null;
+        this.wizardGeneration += 1;
+        wizard.step = "key";
+        break;
+      case "confirm":
+        wizard.step = "key";
+        break;
+      case "key":
+        if (wizard.targetProviderId) this.discardWizard();
+        else wizard.step = "url";
+        break;
+      case "url":
+        this.discardWizard();
+        break;
+    }
+    this.syncFlowTimer();
+    this.paint();
+  }
+
+  private wizardNext(): void {
+    const wizard = this.picker.wizard;
+    if (!wizard) return;
+    switch (wizard.step) {
+      case "url": {
+        const checked = validateCustomBaseUrl(wizard.url);
+        if (!checked.ok) {
+          wizard.error = this.urlRejectMessage(checked.reason, checked.host);
+        } else {
+          wizard.validated = checked.value;
+          wizard.step = "key";
+          wizard.error = null;
+        }
+        break;
+      }
+      case "key": {
+        const parsed = parseKeyInput(wizard.key);
+        if (!parsed.ok) {
+          wizard.error = (t) => t("picker.custom.errorKey");
+          break;
+        }
+        wizard.keyInput = parsed.value;
+        wizard.error = null;
+        if (parsed.value.kind !== "none" && wizard.validated && !wizard.validated.loopback) wizard.step = "confirm";
+        else this.runWizardTest();
+        break;
+      }
+      case "confirm":
+        this.runWizardTest();
+        break;
+      case "testing":
+        break;
+    }
+    this.paint();
+  }
+
+  private runWizardTest(): void {
+    const wizard = this.picker.wizard;
+    const test = this.options.onTestCustomEndpoint;
+    if (!wizard || !wizard.keyInput || !test) return;
+    const generation = (this.wizardGeneration += 1);
+    const abort = new AbortController();
+    wizard.abort = abort;
+    wizard.step = "testing";
+    wizard.error = null;
+    this.syncFlowTimer();
+    const request: CustomEndpointRequest = { rawUrl: wizard.url, key: wizard.keyInput, targetProviderId: wizard.targetProviderId };
+    void test(request, abort.signal).then(
+      (result) => this.finishWizardTest(generation, result),
+      () => this.finishWizardTest(generation, { status: "unreachable" }),
+    );
+  }
+
+  private finishWizardTest(generation: number, result: CustomEndpointTestResult): void {
+    const wizard = this.picker.wizard;
+    if (generation !== this.wizardGeneration || !wizard || !this.picker.open || result.status === "aborted") return;
+    wizard.abort = null;
+    const origin = result.status === "ok" || result.status === "partial" || result.status === "empty" ? result.origin : (result.origin ?? wizard.validated?.origin ?? "");
+    const failToKey = (error: LocalizedMessage): void => {
+      wizard.step = "key";
+      wizard.key = "";
+      wizard.error = error;
+    };
+    const failToUrl = (error: LocalizedMessage): void => {
+      wizard.step = "url";
+      wizard.key = "";
+      wizard.error = error;
+    };
+    switch (result.status) {
+      case "ok":
+      case "partial":
+      case "empty": {
+        const count = result.modelCount;
+        wizard.key = "";
+        this.picker.wizard = null;
+        this.wizardGeneration += 1;
+        const idx = this.pickerTabs().findIndex((tab) => tab.id === result.providerId);
+        if (idx >= 0) this.picker.selectedTab = idx;
+        this.picker.selectedRow = 0;
+        this.picker.notice =
+          result.status === "ok"
+            ? (t) => t("picker.custom.connected", { origin: result.origin, count })
+            : result.status === "partial"
+              ? (t) => t("picker.status.partial", { count })
+              : (t) => t("picker.status.empty");
+        break;
+      }
+      case "auth-required":
+        failToKey((t) => t("picker.status.authRequired"));
+        break;
+      case "denied":
+        failToKey((t) => t("picker.status.denied"));
+        break;
+      case "env-missing": {
+        const name = wizard.keyInput?.kind === "env" ? wizard.keyInput.name : "";
+        failToKey((t) => t("picker.custom.errorEnvMissing", { name }));
+        break;
+      }
+      case "invalid-url":
+        failToUrl((t) => t("picker.custom.errorInvalid"));
+        break;
+      case "api-not-found": {
+        const status = result.httpStatus ?? 200;
+        failToUrl((t) => t("picker.status.apiNotFound", { status }));
+        break;
+      }
+      case "malformed":
+        failToUrl((t) => t("picker.status.malformed"));
+        break;
+      case "redirect":
+        failToUrl((t) => t("picker.status.redirect"));
+        break;
+      case "too-large":
+        failToUrl((t) => t("picker.status.tooLarge"));
+        break;
+      case "http-error": {
+        const status = result.httpStatus ?? 0;
+        failToUrl((t) => t("picker.status.httpError", { status }));
+        break;
+      }
+      case "timeout":
+        failToUrl((t) => t("picker.status.timeout", { origin }));
+        break;
+      case "unreachable":
+        failToUrl((t) => t("picker.status.unreachable", { origin }));
+        break;
+    }
+    this.syncFlowTimer();
+    this.paint();
+  }
+
+  /** Label and text of the single input line while the wizard is open. The key is shown as 8 dots, never its length. */
+  private wizardField(wizard: CustomWizardState): { readonly label: string; readonly text: string } {
+    return wizard.step === "key" || wizard.step === "confirm"
+      ? { label: this.i18n.t("picker.custom.keyLabel"), text: wizard.key ? "••••••••" : "" }
+      : { label: this.i18n.t("picker.custom.urlLabel"), text: wizard.url };
+  }
+
+  /** Step header and body lines for the wizard, wrapped to `width` and already styled. */
+  private wizardView(width: number): { readonly title: string; readonly lines: readonly string[] } {
+    const t = this.theme;
+    const wizard = this.picker.wizard;
+    if (!wizard) return { title: "", lines: [] };
+    const origin = wizard.validated?.origin ?? "";
+    const titleKey =
+      wizard.step === "url" ? "picker.custom.stepUrl" : wizard.step === "testing" ? "picker.custom.stepTest" : "picker.custom.stepKey";
+    const help: string[] = [];
+    switch (wizard.step) {
+      case "url":
+        help.push(this.i18n.t("picker.custom.urlHelp"));
+        break;
+      case "key":
+        help.push(this.i18n.t("picker.custom.keyHelp", { origin }));
+        break;
+      case "confirm":
+        help.push(this.i18n.t("picker.custom.confirmOrigin", { origin }));
+        if (wizard.validated && !wizard.validated.secure) help.push(this.i18n.t("picker.custom.insecureHttp", { origin }));
+        break;
+      case "testing":
+        help.push(`${this.i18n.t("picker.custom.testing", { origin })} ${SPINNER_FRAMES[this.tick % SPINNER_FRAMES.length]}`);
+        break;
+    }
+    const lines: string[] = [];
+    for (const [index, text] of help.entries()) {
+      const color = wizard.step === "confirm" && index === 1 ? t.amber : t.fg;
+      for (const part of wrapPlain(text, Math.max(8, width), true)) lines.push(`${color}${part}${t.reset}`);
+    }
+    if (wizard.error) {
+      for (const part of wrapPlain(wizard.error(this.i18n.t), Math.max(8, width), true)) lines.push(`${t.amber}${part}${t.reset}`);
+    }
+    return { title: this.i18n.upper(this.i18n.t(titleKey)), lines };
+  }
+
   private handlePickerPlain(text: string): void {
     const clean = sanitizeText(text).replace(/[\r\n\t]+/g, "");
     if (!clean) return;
@@ -2837,6 +3198,14 @@ export class TerminalUi {
         }
       }
       this.paint();
+      return;
+    }
+    if (this.picker.wizard) {
+      this.handleWizardPlain(clean);
+      return;
+    }
+    if (this.selectedPickerTab()?.kind === "custom") {
+      this.startWizard(clean.replace(/\s+/g, ""));
       return;
     }
     this.picker.query += clean;
@@ -2900,6 +3269,11 @@ export class TerminalUi {
         default:
           return;
       }
+    }
+
+    if (this.picker.wizard) {
+      this.handleWizardKey(sequence);
+      return;
     }
 
     const tabs = this.pickerTabs();
@@ -3036,6 +3410,15 @@ export class TerminalUi {
     const selected = rows[this.picker.selectedRow];
     if (!selected) {
       const tab = this.pickerTabs()[this.picker.selectedTab];
+      if (tab?.kind === "custom") {
+        if (!saveDefault) this.startWizard();
+        return;
+      }
+      const status = tab?.provider?.catalogStatus;
+      if (tab?.provider && (status === "auth-required" || status === "denied") && this.customTabEnabled()) {
+        if (!saveDefault) this.startWizard("", tab.provider);
+        return;
+      }
       if (tab?.provider && !tab.provider.connected && !tab.provider.local) {
         const { envHint } = tab.provider;
         this.picker.notice = (t) => t("picker.needsKey", { key: envHint });
@@ -5237,12 +5620,16 @@ export class TerminalUi {
       innerW - (rightActiveW > 0 ? rightActiveW + 2 : 0) - 2,
     );
 
-    let shownQuery = this.picker.query;
-    while (visibleWidth(shownQuery) > searchTextBudget) {
+    const wizard = this.picker.wizard;
+    const wizardField = wizard ? this.wizardField(wizard) : null;
+    const fieldPrefix = wizardField ? `${wizardField.label} › ` : "";
+    let shownQuery = wizardField ? wizardField.text : this.picker.query;
+    while (visibleWidth(shownQuery) > Math.max(2, searchTextBudget - visibleWidth(fieldPrefix))) {
       shownQuery = shownQuery.slice(1);
     }
-    const searchLeft =
-      shownQuery.length > 0
+    const searchLeft = wizardField
+      ? `${t.neonCyan}${t.bold}${fieldPrefix}${t.reset}${t.fgBright}${shownQuery}${t.reset}`
+      : shownQuery.length > 0
         ? `${t.neonCyan}${t.bold}⌕ ${t.reset}${t.fgBright}${shownQuery}${t.reset}`
         : `${t.neonCyan}${t.bold}⌕ ${t.reset}${t.muted}${truncateAnsi(
             this.i18n.t("picker.filter"),
@@ -5280,8 +5667,11 @@ export class TerminalUi {
           `${t.neonCyan}${t.bold}${this.i18n.upper(this.i18n.t("picker.providers"))}${t.reset} ${t.muted}(Tab/←→)${t.reset}`,
           leftPaneW,
         );
+        const wizardPane = wizard ? this.wizardView(rightPaneW) : null;
         const rightHdr = padEndAnsi(
-          `${t.neonMint}${t.bold}${this.i18n.upper(this.i18n.t("picker.models"))}${t.reset} ${t.muted}(${this.i18n.t("picker.shown", { count: rowsList.length })})${t.reset}`,
+          wizardPane
+            ? truncateAnsi(`${t.neonMint}${t.bold}${wizardPane.title}${t.reset}`, rightPaneW)
+            : `${t.neonMint}${t.bold}${this.i18n.upper(this.i18n.t("picker.models"))}${t.reset} ${t.muted}(${this.i18n.t("picker.shown", { count: rowsList.length })})${t.reset}`,
           rightPaneW,
         );
         lines.push(
@@ -5289,6 +5679,12 @@ export class TerminalUi {
         );
       }
 
+      // The wizard (or the Custom provider hint) replaces the model rows in the right pane.
+      const paneLines: readonly string[] | null = wizard
+        ? this.wizardView(rightPaneW).lines
+        : activeTab?.kind === "custom"
+          ? wrapPlain(this.i18n.t("picker.custom.hint"), Math.max(8, rightPaneW), true).map((part) => `${t.muted}${part}${t.reset}`)
+          : null;
       const tabOffset =
         selTab >= listRows
           ? Math.min(Math.max(0, tabs.length - listRows), selTab - listRows + 1)
@@ -5306,7 +5702,10 @@ export class TerminalUi {
         const tab = tabs[tabIdx];
         const isTabSel = tabIdx === selTab;
         let leftCell = "";
-        if (tab) {
+        if (tab?.kind === "custom") {
+          const ptr = isTabSel ? `${t.neonCyan}${t.bold}▸${t.reset}` : " ";
+          leftCell = `${isTabSel ? t.selBg : ""}${padEndAnsi(`${ptr}${t.neonMint}${t.bold}${truncateAnsi(tab.label, Math.max(4, leftPaneW - 1))}${t.reset}`, leftPaneW)}${t.reset}`;
+        } else if (tab) {
           const status = tab.provider?.catalogStatus;
           const dot =
             tab.id === "all"
@@ -5357,7 +5756,9 @@ export class TerminalUi {
         const mRow = rowsList[rIdx];
         const isRowSel = rIdx === selRow;
         let rightCell = "";
-        if (rowsList.length === 0 && i === 0) {
+        if (paneLines) {
+          rightCell = padEndAnsi(truncateAnsi(paneLines[i] ?? "", rightPaneW), rightPaneW);
+        } else if (rowsList.length === 0 && i === 0) {
           const emptyHint =
             activeTab?.provider &&
             !activeTab.provider.connected &&
@@ -5440,12 +5841,20 @@ export class TerminalUi {
               selRow - listRows + 1,
             )
           : 0;
+      const singleWizard = wizard ? this.wizardView(innerW) : null;
+      const singleLines: readonly string[] | null = singleWizard
+        ? [`${t.neonMint}${t.bold}${singleWizard.title}${t.reset}`, ...singleWizard.lines]
+        : activeTab?.kind === "custom"
+          ? wrapPlain(this.i18n.t("picker.custom.hint"), Math.max(8, innerW), true).map((part) => `${t.muted}${part}${t.reset}`)
+          : null;
       for (let i = 0; i < listRows; i += 1) {
         const rIdx = rowOffset + i;
         const mRow = rowsList[rIdx];
         const isRowSel = rIdx === selRow;
         let cell = "";
-        if (!mRow) {
+        if (singleLines) {
+          cell = padEndAnsi(truncateAnsi(singleLines[i] ?? "", innerW), innerW);
+        } else if (!mRow) {
           cell = padEndAnsi(
             i === 0 ? `${t.muted}${this.i18n.t("picker.noMatching")}${t.reset}` : "",
             innerW,
@@ -5550,6 +5959,27 @@ export class TerminalUi {
             );
           }
         }
+      } else if (wizard) {
+        const origin = wizard.validated?.origin ?? "";
+        const prompt =
+          wizard.step === "url"
+            ? this.i18n.t("picker.custom.urlPrompt")
+            : wizard.step === "key"
+              ? this.i18n.t("picker.custom.keyPrompt")
+              : wizard.step === "confirm"
+                ? this.i18n.t("picker.custom.confirmOrigin", { origin })
+                : this.i18n.t("picker.custom.testing", { origin });
+        lines.push(
+          `${t.borderActive}│${t.reset} ${padEndAnsi(truncateAnsi(`${t.muted}${prompt}${t.reset}`, innerW), innerW)} ${t.borderActive}│${t.reset}`,
+        );
+        if (footerInfoRows >= 2) {
+          const detail = wizard.error
+            ? `${t.amber}◈ ${wizard.error(this.i18n.t)}${t.reset}`
+            : `${t.muted}${this.i18n.t("picker.custom.keys")}${t.reset}`;
+          lines.push(
+            `${t.borderActive}│${t.reset} ${padEndAnsi(truncateAnsi(detail, innerW), innerW)} ${t.borderActive}│${t.reset}`,
+          );
+        }
       } else {
         const focusProvider =
           rowsList[selRow]?.provider ??
@@ -5616,11 +6046,13 @@ export class TerminalUi {
     lines.push(`${t.borderActive}╰${hline(cols - 2)}╯${t.reset}`);
     const foot = isEffortStage
       ? `${t.muted} ${this.i18n.t("picker.effortKeys", { action: this.i18n.t(this.picker.effortOnly ? "picker.close" : "picker.backAction") })}${t.reset}`
-      : `${t.muted} ${this.i18n.t("picker.nav")}${t.reset}`;
+      : wizard
+        ? `${t.muted} ${this.i18n.t("picker.custom.keys")}${t.reset}`
+        : `${t.muted} ${this.i18n.t("picker.nav")}${t.reset}`;
     lines.push(truncateAnsi(foot, Math.max(10, cols - 1)));
 
     while (lines.length < rows) lines.push("");
-    const cursorCol = Math.min(cols - 2, 3 + 2 + visibleWidth(shownQuery));
+    const cursorCol = Math.min(cols - 2, 3 + 2 + visibleWidth(fieldPrefix) + visibleWidth(shownQuery));
     return {
       lines: lines.slice(0, rows),
       cursor: { row: 2, col: cursorCol, visible: !isEffortStage },

@@ -1,4 +1,5 @@
-/** Pure validation helpers for user-typed endpoints. No I/O and no imports from other omr modules. */
+/** Pure validation helpers for user-typed endpoints. No I/O; only types are imported from other omr modules. */
+import type { CatalogStatus } from "./providers.js";
 
 export type UrlRejectReason = "empty" | "scheme" | "invalid" | "credentials" | "query" | "host" | "too-long";
 
@@ -132,3 +133,19 @@ export const sameEndpoint = (a: string, b: string): boolean => {
   const right = endpointKey(b);
   return left !== null && right !== null && left === right;
 };
+
+/** What the picker's Custom provider wizard asks the controller to test. */
+export interface CustomEndpointRequest {
+  readonly rawUrl: string;
+  readonly key: KeyInput;
+  /** Set when the wizard was opened from a router that answered 401/403: the key goes to that provider. */
+  readonly targetProviderId: string | null;
+}
+
+export type CustomEndpointTestResult =
+  | { readonly status: "ok" | "partial" | "empty"; readonly providerId: string; readonly origin: string; readonly modelCount: number }
+  | {
+      readonly status: Exclude<CatalogStatus, "ok" | "partial" | "empty" | "loading" | "offline"> | "invalid-url" | "env-missing" | "aborted";
+      readonly httpStatus?: number;
+      readonly origin?: string;
+    };

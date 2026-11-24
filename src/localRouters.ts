@@ -255,6 +255,8 @@ export interface DiscoverOptions {
   readonly cache?: CatalogCache;
   readonly force?: boolean;
   readonly now?: () => number;
+  /** A key the user typed for this router in this session; takes precedence over the product env key. */
+  readonly keyFor?: (product: RouterProduct, apiBase: string) => string | undefined;
 }
 
 const keyId = (key: string): string => (key ? createHash("sha256").update(key).digest("hex").slice(0, 16) : "-");
@@ -272,7 +274,7 @@ export const discoverLocalRouters = async (options: DiscoverOptions): Promise<re
   };
 
   const catalogFor = async (product: RouterProduct, apiBase: string, ownKey: string | undefined): Promise<CatalogResult> => {
-    const key = ownKey ?? routerKey(product, env);
+    const key = ownKey ?? options.keyFor?.(product, apiBase) ?? routerKey(product, env);
     const cacheKey = `${product}|${apiBase}|${keyId(key)}`;
     const cached = options.cache?.get(cacheKey);
     if (cached && !options.force && now() - cached.at < DISCOVERY_LIMITS.catalogTtlMs) return cached.result;

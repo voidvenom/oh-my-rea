@@ -23,7 +23,15 @@ import {
   type ModelConfigInfo,
   type ReasoningEffort,
 } from "../modelConfig.js";
-import { sameEndpoint } from "../customEndpoint.js";
+import {
+  SESSION_KEY_SOURCE,
+  customProviderId,
+  sameEndpoint,
+  validateCustomBaseUrl,
+  type CustomEndpointRequest,
+  type CustomEndpointTestResult,
+  type KeyInput,
+} from "../customEndpoint.js";
 import type { CatalogCache, RouterCandidate } from "../localRouters.js";
 import {
   discoverProvidersSync,
@@ -56,6 +64,8 @@ export class ModelController {
   private discoveryGeneration = 0;
   private lastScan: { readonly at: number; readonly found: number; readonly signature: string } | null = null;
   private readonly catalogCache: CatalogCache = new Map();
+  /** What the user typed for session providers (kept for saving; literal values never leave memory unless saved). */
+  private readonly sessionKeys = new Map<string, KeyInput>();
   modelInfo: ModelConfigInfo | null = null;
   modelError: string | null = null;
   modelId: string;
@@ -133,6 +143,10 @@ export class ModelController {
       if (existing) {
         out[index] = {
           ...existing,
+          // A key the user typed for this provider in this session replaces an empty or rejected one.
+          ...(overlay.provenance === "session" && overlay.id === existing.id
+            ? { apiKey: overlay.apiKey, keySource: overlay.keySource, apiKeyEnv: overlay.apiKeyEnv, connected: true }
+            : {}),
           ...(existing.product ?? overlay.product ? { product: (existing.product ?? overlay.product)! } : {}),
           ...(overlay.catalogStatus ? { catalogStatus: overlay.catalogStatus } : {}),
           ...(overlay.httpStatus !== undefined ? { httpStatus: overlay.httpStatus } : {}),
@@ -506,6 +520,7 @@ export class ModelController {
         candidates,
         cache: this.catalogCache,
         force,
+        keyFor: (product, apiBase) => this.sessionKeyFor(this.routerOverlayId(product, apiBase)),
         onRouter: (router) => {
           if (!current()) return;
           const id = this.routerOverlayId(router.product, router.apiBase);
@@ -516,7 +531,9 @@ export class ModelController {
               touched.delete(otherId);
             }
           }
-          this.overlays.set(id, routerProvider(router, id, this.env));
+          const provider = routerProvider(router, id, this.env);
+          const typed = this.sessionKeyFor(id);
+          this.overlays.set(id, typed ? { ...provider, apiKey: typed, keySource: this.sessionKeySource(id) } : provider);
           touched.add(id);
           this.recomputeProviders();
           ui?.updateModelPicker({ providers: this.providers });
@@ -548,6 +565,95 @@ export class ModelController {
       });
     this.discoveryJob = { generation, abort, done };
     return done;
+  }
+
+  private resolveKeyInput(input: KeyInput): string {
+    return input.kind === "literal" ? input.value : input.kind === "env" ? (this.env[input.name]?.trim() ?? "") : "";
+  }
+
+  private sessionKeyFor(id: string): string | undefined {
+    const input = this.sessionKeys.get(id);
+    const key = input ? this.resolveKeyInput(input) : "";
+    return key || undefined;
+  }
+
+  private sessionKeySource(id: string): string {
+    const input = this.sessionKeys.get(id);
+    return input?.kind === "env" ? `env ${input.name}` : SESSION_KEY_SOURCE;
+  }
+
+  /**
+   * Tests a user-typed endpoint with the bounded catalog fetch and, on success, adds it for this session.
+   * The key goes only to the validated origin; no other credential is ever read.
+   */
+  async testCustomEndpoint(request: CustomEndpointRequest, signal: AbortSignal): Promise<CustomEndpointTestResult> {
+    const checked = validateCustomBaseUrl(request.rawUrl);
+    if (!checked.ok) return { status: "invalid-url" };
+    const value = checked.value;
+    if (request.key.kind === "env" && !this.env[request.key.name]?.trim()) return { status: "env-missing", origin: value.origin };
+    const apiKey = this.resolveKeyInput(request.key);
+    const { fetchCatalog, DISCOVERY_LIMITS } = await import("../localRouters.js");
+    const options = { signal, timeoutMs: DISCOVERY_LIMITS.customTestTimeoutMs };
+    const target = request.targetProviderId ? this.providers.find((provider) => provider.id === request.targetProviderId) : undefined;
+    // A router that asked for a key is probed at its own API base; a bare host:port is tried with /v1 first.
+    const tryBare = !target && value.originOnly;
+    let probeBase = target ? target.baseUrl : tryBare ? `${value.origin}/v1` : value.baseUrl;
+    let result = await fetchCatalog(probeBase, apiKey, options);
+    if (tryBare && (result.status === "api-not-found" || result.status === "http-error") && !signal.aborted) {
+      const bare = await fetchCatalog(value.origin, apiKey, options);
+      if (bare.status === "ok" || bare.status === "partial" || bare.status === "empty") {
+        result = bare;
+        probeBase = value.origin;
+      }
+    }
+    if (signal.aborted) return { status: "aborted" };
+    if (result.status !== "ok" && result.status !== "partial" && result.status !== "empty") {
+      return {
+        status: result.status === "loading" || result.status === "offline" ? "unreachable" : result.status,
+        origin: value.origin,
+        ...(result.httpStatus !== undefined ? { httpStatus: result.httpStatus } : {}),
+      };
+    }
+    const sameOrigin = target ?? this.providers.find((provider) => sameEndpoint(provider.baseUrl, probeBase));
+    const taken = new Set([...this.baseProviders.map((provider) => provider.id), ...this.overlays.keys()]);
+    const id = sameOrigin?.id ?? customProviderId(value, taken);
+    const typed = request.key.kind !== "none";
+    // An existing provider keeps its own credential unless the user typed one for it (auth-required flow).
+    const keepExisting = sameOrigin !== undefined && !typed && sameOrigin.apiKey !== "";
+    const host = new URL(value.origin).host;
+    const provider: ResolvedProvider = {
+      id,
+      name: sameOrigin?.name ?? `Custom (${host})`,
+      protocol: "openai-chat",
+      baseUrl: sameOrigin?.baseUrl ?? probeBase,
+      connected: true,
+      local: value.loopback,
+      apiKey: keepExisting ? sameOrigin.apiKey : apiKey,
+      apiKeyEnv: keepExisting ? sameOrigin.apiKeyEnv : request.key.kind === "env" ? request.key.name : (sameOrigin?.apiKeyEnv || "OMR_API_KEY"),
+      keySource: keepExisting
+        ? sameOrigin.keySource
+        : request.key.kind === "literal"
+          ? SESSION_KEY_SOURCE
+          : request.key.kind === "env"
+            ? `env ${request.key.name}`
+            : value.loopback
+              ? "local (no key)"
+              : "none",
+      envHint: sameOrigin?.envHint ?? "",
+      headers: {},
+      models: result.models,
+      liveLoaded: true,
+      error: null,
+      provenance: sameOrigin?.provenance === "detected" ? "detected" : "session",
+      ...(sameOrigin?.product ? { product: sameOrigin.product } : {}),
+      catalogStatus: result.status,
+      ...(result.httpStatus !== undefined ? { httpStatus: result.httpStatus } : {}),
+    };
+    this.overlays.set(id, provider);
+    if (typed) this.sessionKeys.set(id, request.key);
+    this.recomputeProviders();
+    this.output.ui?.updateModelPicker({ providers: this.providers });
+    return { status: result.status, providerId: id, origin: value.origin, modelCount: result.models.length };
   }
 
   /** Stops an in-flight scan (the picker was closed). Overlays already applied stay. */

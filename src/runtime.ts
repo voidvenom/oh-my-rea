@@ -291,6 +291,8 @@ export const runOmr = async (
       onOpenCompactionModelPicker: () => {
         ctx?.modelController.openInteractiveCompactionModelPicker();
       },
+      onTestCustomEndpoint: (request, signal) =>
+        ctx ? ctx.modelController.testCustomEndpoint(request, signal) : Promise.resolve({ status: "aborted" as const }),
       onModelPickerClosed: () => {
         ctx?.modelController.cancelRouterDiscovery();
       },
