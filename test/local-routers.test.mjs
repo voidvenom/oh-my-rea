@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { after, test } from "node:test";
 import { COMMANDS } from "../dist/commands.js";
 import { createTheme, stripAnsi, visibleWidth } from "../dist/ansi.js";
 import { DEFAULT_COMPACTION_SETTINGS } from "../dist/compaction.js";
 import { I18n } from "../dist/i18n/index.js";
-import { modelConfigPath, resolveModelConfig } from "../dist/modelConfig.js";
+import { resolveModelConfig } from "../dist/modelConfig.js";
 import { ModelController } from "../dist/runtime/modelController.js";
 import { OutputSink } from "../dist/runtime/output.js";
 import { TerminalUi } from "../dist/tui.js";
