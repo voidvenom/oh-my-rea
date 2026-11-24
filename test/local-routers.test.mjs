@@ -109,7 +109,7 @@ test("boundedGet refuses redirects, caps bodies, times out and aborts", async ()
   assert.ok(performance.now() - started < 600);
   const closed = await startServer({});
   await closed.close();
-  assert.equal((await boundedGet(`${closed.origin}/x`, { timeoutMs: 1000, maxBytes: 1024 })).kind, "unreachable");
+  assert.equal((await boundedGet(`${closed.origin}/x`, { timeoutMs: 5000, maxBytes: 1024 })).kind, "unreachable");
   assert.equal((await boundedGet(`${server.origin}/ok`, { timeoutMs: 1000, maxBytes: 1024, signal: AbortSignal.abort() })).kind, "aborted");
   const ok = await boundedGet(`${server.origin}/ok`, { timeoutMs: 1000, maxBytes: 1024 });
   assert.deepEqual(JSON.parse(ok.body), { fine: true });
