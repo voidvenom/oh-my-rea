@@ -224,19 +224,27 @@ test("/lang repaints the running startup activity and startup notices in both di
         "--mark", `activity=${before["runtime.startingRea"]}`,
         "--mark", `heading=${heading(before)}`, "--mark", `update=${update(before)}`,
         "--send-on", "activity", "--send-on", "heading", "--send-on", "update",
-        "--mark", `switched=(${after["status.cancel"]})`, "--stop-on", "switched",
+        // The status is the final screen row; wait until its row update is complete.
+        "--mark", `switched=(${after["status.cancel"]})\x1b[K`, "--stop-on", "switched",
         "--", process.execPath, cli, "--no-model",
       ], { cwd: root, env, timeout: 14_000 });
       const result = JSON.parse(stdout);
       for (const mark of Object.values(result.marks)) assert.notEqual(mark, null, `${from} → ${to}\n${stdout}`);
       const frames = (await readFile(dump, "utf8")).split("\x1b[?2026h");
-      const lastFrame = frames.findLast((frame) => frame.includes(`(${after["status.cancel"]})`));
-      const status = stripAnsi(lastFrame.match(/\x1b\[40;1H(.*?)\x1b\[K/)?.[1] ?? "");
+      // Synchronized paints are deltas, not full screens. Spinner ticks may only redraw row 40.
+      const screen = new Map();
+      for (const frame of frames.slice(1)) {
+        if (frame.includes("\x1b[2J")) screen.clear();
+        for (const [, row, line] of frame.matchAll(/\x1b\[(\d+);1H(.*?)\x1b\[K/g)) {
+          screen.set(Number(row), stripAnsi(line));
+        }
+      }
+      const status = screen.get(40) ?? "";
       for (const key of ["runtime.startingRea", "status.cancel", "status.noModel", "status.context"]) {
         assert.ok(status.includes(after[key]), status);
         assert.ok(!status.includes(before[key]), status);
       }
-      const rendered = stripAnsi(lastFrame);
+      const rendered = [...screen.values()].join("\n");
       const bitstream = (catalog, locale) => `${catalog["hud.bitstream"].toLocaleUpperCase(locale)} (${catalog["hud.binaryOn"]})`;
       for (const text of [heading(after), footer(after), update(after), updateBody(after), after["composer.busy"], after["hero.connecting"], bitstream(after, to)]) {
         assert.ok(rendered.includes(text), `Missing ${text} in ${from} → ${to}\n${rendered}`);

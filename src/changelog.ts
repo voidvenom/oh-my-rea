@@ -6,7 +6,8 @@ import { VERSION } from "./version.js";
 
 export const CHANGELOG_FILE = new URL("../CHANGELOG.md", import.meta.url);
 
-export const parseChangelog = (markdown: string): ReadonlyMap<string, string> => {
+export const parseChangelog = (source: string): ReadonlyMap<string, string> => {
+  const markdown = source.replaceAll("\r\n", "\n");
   const sections = new Map<string, string>();
   const headings = [...markdown.matchAll(/^## \[([^\]\r\n]+)\][^\r\n]*/gm)];
   for (const [i, heading] of headings.entries()) {
@@ -19,7 +20,7 @@ export const parseChangelog = (markdown: string): ReadonlyMap<string, string> =>
 
 export const changelogText = async (selection = VERSION, file: URL | string = CHANGELOG_FILE): Promise<string | null> => {
   const markdown = await readFile(file, "utf8");
-  return selection === "--all" ? markdown.trim() : parseChangelog(markdown).get(selection.replace(/^v(?=\d)/, "")) ?? null;
+  return selection === "--all" ? markdown.replaceAll("\r\n", "\n").trim() : parseChangelog(markdown).get(selection.replace(/^v(?=\d)/, "")) ?? null;
 };
 
 export const releaseSummary = (section: string): string => {

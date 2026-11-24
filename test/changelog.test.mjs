@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { CHANGELOG_FILE, changelogText, parseChangelog, releaseSummary } from "../dist/changelog.js";
 import { VERSION } from "../dist/version.js";
@@ -28,7 +30,22 @@ test("the packaged changelog covers the current version and lists releases newes
   }
   assert.equal(await changelogText(), sections.get(VERSION));
   assert.equal(await changelogText("v0.5.1"), sections.get("0.5.1"));
-  assert.equal(await changelogText("--all"), markdown.trim());
+  assert.equal(await changelogText("--all"), markdown.replaceAll("\r\n", "\n").trim());
   assert.equal(await changelogText("9.9.9"), null);
   assert.throws(() => parseChangelog("## [0.6.0]\n## [0.6.0]\n"), /Duplicate/);
+});
+
+test("a CRLF changelog produces the same release notes and full text as LF", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "omr-changelog-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const file = join(root, "CHANGELOG.md");
+  const markdown = "# Changelog\n\n## [Unreleased]\n\n## [1.2.3] - 2026-11-23\n\n### Fixed\n\n- First sentence. Second sentence.\n";
+  const crlf = markdown.replaceAll("\n", "\r\n");
+  await writeFile(file, crlf);
+
+  assert.deepEqual(parseChangelog(crlf), parseChangelog(markdown));
+  const section = await changelogText("v1.2.3", file);
+  assert.equal(section, markdown.slice(markdown.indexOf("## [1.2.3]")).trim());
+  assert.equal(releaseSummary(section), "- First sentence.");
+  assert.equal(await changelogText("--all", file), markdown.trim());
 });

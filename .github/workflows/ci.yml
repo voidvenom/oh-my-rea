@@ -32,6 +32,9 @@ jobs:
       - run: npm test
       - name: Pack, install and run the CLI without REA; typecheck and run the installed SDK
         run: npm run test:package
+      - name: Portable benchmark smoke
+        if: matrix.node == '24.22.1'
+        run: node bench/platform.mjs --samples 5
       - name: Install Turkish locale for the locale-specific check
         if: runner.os == 'Linux' && matrix.node == '24.22.1'
         run: sudo locale-gen tr_TR.UTF-8
