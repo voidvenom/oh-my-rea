@@ -8,6 +8,7 @@
 [![CI](https://github.com/voidvenom/oh-my-rea/actions/workflows/ci.yml/badge.svg)](https://github.com/voidvenom/oh-my-rea/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%5E22.23.4%20%7C%7C%20%5E24.22.1%20%7C%7C%20%3E%3D26.12.1-339933?logo=node.js&logoColor=white)](package.json)
+[![Featured in Awesome REA](https://img.shields.io/badge/Featured%20in-Awesome%20REA-f0b429)](https://github.com/AIshihzong/awesome-reverse-engineer-anything)
 
 [Quick start](#quick-start) · [Examples](#examples) · [Models](#models) · [Commands](#commands) · [Reference](docs/REFERENCE.md)
 
